@@ -145,28 +145,54 @@ func (s *Supervisor) Start(ctx context.Context) {
 	// disabled in the parent session config, in which case we rely on
 	// future VoiceStateUpdate deltas.
 	s.primeFromState()
-	// Keep ctx wired for possible future uses (e.g., cancelling in-flight
-	// join attempts). Today Stop() handles lifecycle via stopCh.
-	_ = ctx
+	// Parent-context cancellation closes our stopCh so goroutines drain
+	// cleanly without requiring the caller to also call Stop(). Stop() is
+	// still the preferred shutdown path because it waits for drain; ctx
+	// cancel is a safety net for callers that forget.
+	if ctx != nil && ctx.Done() != nil {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			defer safego.Recover(nil, "component", "voice.supervisor.ctx-watch")
+			select {
+			case <-ctx.Done():
+				s.stopOnce.Do(func() {
+					s.stopped.Store(true)
+					close(s.stopCh)
+				})
+			case <-s.stopCh:
+			}
+		}()
+	}
 }
 
 // Stop disconnects any active voice connection, tears down goroutines, and
 // deregisters gateway handlers. Idempotent. Blocks until fully drained or
 // ctx is cancelled.
+//
+// Drain time depends on discordgo's voice teardown, which can take several
+// seconds on a slow network. Callers who need a hard cap MUST pass a ctx
+// with WithTimeout. A context.Background() argument will wait indefinitely
+// — intentional, because discarding a live voice connection without
+// Disconnect() can leak UDP sockets and WebSocket connections server-side.
 func (s *Supervisor) Stop(ctx context.Context) {
 	s.stopOnce.Do(func() {
 		s.stopped.Store(true)
 		close(s.stopCh)
 	})
-	for _, rm := range s.removers {
+
+	s.mu.Lock()
+	removers := s.removers
+	s.removers = nil
+	s.mu.Unlock()
+	for _, rm := range removers {
 		if rm != nil {
 			rm()
 		}
 	}
-	s.removers = nil
 
 	// Detach + tear down any active connection. leaveLocked closes the
-	// underlying VoiceConnection; we still wait for our own goroutines.
+	// underlying VoiceConnection on a detached goroutine tracked by wg.
 	s.mu.Lock()
 	s.leaveLocked("supervisor_stop")
 	s.mu.Unlock()
@@ -176,11 +202,12 @@ func (s *Supervisor) Stop(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		s.log.Warn("voice: Stop() wait cancelled", "err", ctx.Err())
-	case <-time.After(2 * time.Second):
-		// Safety cap: discordgo voice goroutines occasionally wedge; don't
-		// block the whole discord.Channel.Stop() on it.
-		s.log.Warn("voice: Stop() drain timed out after 2s")
+		// Caller-owned deadline. The detached leave-goroutine continues
+		// in the background; its Disconnect will eventually complete (or
+		// error out) without our supervision. Logged so operators can
+		// spot a slow discordgo shutdown.
+		s.log.Warn("voice: Stop() wait cancelled by caller context",
+			"err", ctx.Err())
 	}
 }
 
@@ -249,15 +276,21 @@ func (s *Supervisor) onGuildCreate(_ *discordgo.Session, ev *discordgo.GuildCrea
 
 // onOwnVoiceState handles updates about the bot itself. If the bot was
 // connected and its new channel is different from our target, treat it as
-// an admin kick/move and arm the cooldown. A normal Disconnect initiated
-// by us clears the connection first, so the VC we see here is what remains
-// of a forced move.
+// an admin kick/move and arm the cooldown.
+//
+// LOAD-BEARING INVARIANT: leaveLocked sets state.vc = nil BEFORE spawning
+// the detached goroutine that calls vc.Disconnect(). discordgo emits a
+// VoiceStateUpdate for our bot when that Disconnect succeeds; that handler
+// re-enters this function, but state.vc is already nil so the early-return
+// below fires and we don't double-leave. Do NOT reorder leaveLocked's
+// field clears — this guard depends on them happening before the goroutine
+// runs.
 func (s *Supervisor) onOwnVoiceState(ev *discordgo.VoiceStateUpdate) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	connected := s.state.vc != nil
 	if !connected {
-		return // we never joined, or we already left voluntarily
+		return // we never joined, or we already left voluntarily (or our own Disconnect echoed back — see load-bearing invariant above)
 	}
 	if ev.ChannelID == s.cfg.VoiceChannelID {
 		return // still in the right place (e.g., mute toggled)
@@ -431,6 +464,11 @@ func (s *Supervisor) onJoinSuccess(vc *discordgo.VoiceConnection) {
 	s.state.vc = vc
 	s.state.joinFailures = 0
 	s.state.circuitOpenUntil = time.Time{}
+	// kickedUntil is normally in the past by the time a successful join
+	// happens (reconcile waits out the cooldown before retrying), but clear
+	// it explicitly so inCooldownLocked doesn't keep returning true on a
+	// stale timestamp after the cooldown window.
+	s.state.kickedUntil = time.Time{}
 	s.log.Info("voice: joined voice channel", "channel_id", s.cfg.VoiceChannelID)
 
 	// Start the transcriber first so its queue is ready before demux starts

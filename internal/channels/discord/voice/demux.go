@@ -85,6 +85,14 @@ func (d *demux) start(ctx context.Context) {
 	//     this handler retroactively attaches userID when the update arrives.
 	//   - Speaking=false: flush and clear.
 	d.vc.AddHandler(func(_ *discordgo.VoiceConnection, vs *discordgo.VoiceSpeakingUpdate) {
+		// discordgo's VoiceConnection.AddHandler has no remover — handlers
+		// are kept for the lifetime of the VoiceConnection. After stop(),
+		// the connection may still dispatch one or two stray events (e.g.,
+		// a Speaking=false from discordgo's own shutdown), which would hit
+		// a now-abandoned out channel. Guard early so those events no-op.
+		if d.stopped.Load() {
+			return
+		}
 		// Cast int → uint32 explicitly (plan regression guard). Discord SSRCs
 		// are defined as uint32 on the wire; discordgo decodes them into int
 		// for historical reasons, so bits above 2^31 would be negative after

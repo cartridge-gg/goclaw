@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -73,6 +74,39 @@ func Test_displayNameCache_expiry(t *testing.T) {
 	}
 }
 
+// sweepExpired prevents unbounded growth from speaker churn. Without the
+// sweep, a silent speaker's cache entry would stick around past its TTL
+// until someone happened to call get() for that userID.
+func Test_displayNameCache_sweepExpired_drops_stale_entries(t *testing.T) {
+	c := newDisplayNameCache()
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	c.set("alice", "Alice")
+	c.set("bob", "Bob")
+	// Age alice out; bob stays fresh.
+	c.now = func() time.Time { return now.Add(displayNameTTL + time.Minute) }
+	c.set("charlie", "Charlie")
+
+	c.sweepExpired()
+
+	// alice and bob were both set at now; both are expired at now+TTL+1m.
+	// charlie was set at now+TTL+1m, still fresh.
+	c.mu.Lock()
+	_, aliceStillCached := c.m["alice"]
+	_, bobStillCached := c.m["bob"]
+	_, charlieStillCached := c.m["charlie"]
+	c.mu.Unlock()
+	if aliceStillCached {
+		t.Error("expired entry 'alice' not swept")
+	}
+	if bobStillCached {
+		t.Error("expired entry 'bob' not swept")
+	}
+	if !charlieStillCached {
+		t.Error("fresh entry 'charlie' incorrectly swept")
+	}
+}
+
 // --- daily cap counter -----------------------------------------------------
 
 func Test_dailyCapCounter_consumes_under_cap(t *testing.T) {
@@ -99,6 +133,20 @@ func Test_dailyCapCounter_rejects_over_cap(t *testing.T) {
 	}
 }
 
+// capMs <= 0 means unlimited. Defensive — the adversarial review found that
+// a zero-cap counter would silently block every utterance because
+// consumedMs+durMs > 0 for any positive durMs. Production paths set a
+// default via ApplyDefaults, but a future builder/test that constructs
+// the counter directly with 0 should not accidentally block everything.
+func Test_dailyCapCounter_zero_cap_is_unlimited(t *testing.T) {
+	c := newDailyCapCounter(0)
+	for i := 0; i < 1000; i++ {
+		if !c.tryConsume(60_000) { // 1 minute each, 1000 times = 16+ hours of audio
+			t.Fatal("zero-cap counter rejected an utterance; expected unlimited")
+		}
+	}
+}
+
 func Test_dailyCapCounter_rolls_over_at_UTC_day_boundary(t *testing.T) {
 	c := newDailyCapCounter(10)
 	day1 := time.Date(2026, 4, 23, 23, 59, 0, 0, time.UTC)
@@ -121,7 +169,7 @@ func Test_dailyCapCounter_rolls_over_at_UTC_day_boundary(t *testing.T) {
 
 func Test_resolveDisplayName_empty_userID_uses_ssrc_fallback(t *testing.T) {
 	tr := &transcriber{cfg: Config{GuildID: "g"}, session: &fakeSession{}, log: discardLogger(), nameCache: newDisplayNameCache()}
-	got := tr.resolveDisplayName(1234, "")
+	got := tr.resolveDisplayName(context.Background(), 1234, "")
 	if got != "user:1234" {
 		t.Fatalf("expected user:1234 fallback, got %q", got)
 	}
@@ -135,7 +183,7 @@ func Test_resolveDisplayName_cache_hit_avoids_api_call(t *testing.T) {
 	}
 	tr := &transcriber{cfg: Config{GuildID: "g"}, session: fs, log: discardLogger(), nameCache: newDisplayNameCache()}
 	tr.nameCache.set("u1", "CachedAlice")
-	got := tr.resolveDisplayName(0, "u1")
+	got := tr.resolveDisplayName(context.Background(), 0, "u1")
 	if got != "CachedAlice" {
 		t.Fatalf("expected cache hit, got %q", got)
 	}
@@ -151,12 +199,12 @@ func Test_resolveDisplayName_api_error_falls_back_to_userID(t *testing.T) {
 		},
 	}
 	tr := &transcriber{cfg: Config{GuildID: "g"}, session: fs, log: discardLogger(), nameCache: newDisplayNameCache()}
-	got := tr.resolveDisplayName(7, "u7")
+	got := tr.resolveDisplayName(context.Background(), 7, "u7")
 	if got != "u7" {
 		t.Fatalf("expected userID fallback, got %q", got)
 	}
 	// Subsequent call must not re-fetch (we cached the fallback).
-	_ = tr.resolveDisplayName(7, "u7")
+	_ = tr.resolveDisplayName(context.Background(), 7, "u7")
 	if fs.guildMemberCalls != 1 {
 		t.Fatalf("expected 1 GuildMember call total (api failures should also cache), got %d", fs.guildMemberCalls)
 	}
@@ -239,7 +287,7 @@ func Test_postTranscript_formats_displayname_prefix(t *testing.T) {
 		},
 	}
 	tr := newTestTranscriber(fs)
-	tr.postTranscript(nil, utterance{ssrc: 1, userID: "u1"}, "hello world")
+	tr.postTranscript(context.Background(), utterance{ssrc: 1, userID: "u1"}, "hello world")
 	if fs.channelSendCalls != 1 {
 		t.Fatalf("expected 1 send, got %d", fs.channelSendCalls)
 	}
@@ -262,7 +310,7 @@ func Test_postTranscript_truncates_over_discord_limit(t *testing.T) {
 	}
 	tr := newTestTranscriber(fs)
 	long := strings.Repeat("x", 3000)
-	tr.postTranscript(nil, utterance{ssrc: 1, userID: "u1"}, long)
+	tr.postTranscript(context.Background(), utterance{ssrc: 1, userID: "u1"}, long)
 	if len(fs.lastSentContent) > 1900 {
 		t.Fatalf("did not truncate: len=%d", len(fs.lastSentContent))
 	}
@@ -290,7 +338,7 @@ func Test_sweepOnce_removes_old_orphan_and_keeps_recent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tr := &transcriber{tmpDir: dir, log: discardLogger()}
+	tr := &transcriber{tmpDir: dir, log: discardLogger(), nameCache: newDisplayNameCache()}
 	tr.sweepOnce(time.Now())
 
 	if _, err := os.Stat(old); !os.IsNotExist(err) {

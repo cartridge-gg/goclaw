@@ -24,6 +24,15 @@ import (
 // without letting nickname changes go stale forever.
 const displayNameTTL = time.Hour
 
+// Per-REST-call timeouts. Without these, a Discord network stall or REST
+// outage pins the transcriber worker and backs the utterance queue up
+// until demux starts dropping at max-capacity. Values are generous —
+// ChannelMessageSend typically round-trips in <200ms; GuildMember <500ms.
+const (
+	channelSendTimeout = 5 * time.Second
+	guildMemberTimeout = 3 * time.Second
+)
+
 // orphanSweepInterval is the cadence for removing tmpfiles left behind by
 // a panicking or crashing worker. 10min of audio is ~1MB of Ogg/Opus, so
 // cleaning anything older than that is a generous upper bound.
@@ -50,7 +59,7 @@ type transcriber struct {
 	wg          sync.WaitGroup
 	nameCache   *displayNameCache
 	capCounter  *dailyCapCounter
-	sttDisabled atomic.Bool // set when we hit an auth error; stays off until Stop
+	sttDisabled atomic.Bool  // set when we hit an auth error; stays off until Stop
 	circuitOpen atomic.Int64 // unix-nano deadline when quota-circuit reopens
 }
 
@@ -199,16 +208,32 @@ func (t *transcriber) processUtterance(ctx context.Context, u utterance) {
 func (t *transcriber) handleSTTError(err error, u utterance) {
 	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "API error 401"), strings.Contains(msg, "API error 403"):
-		// Auth failure: disable for rest of session. A config reload via pod
-		// restart is the only way to re-enable (hot-reload is a known-unfixed
-		// limitation per plan codex-14).
+	case strings.Contains(msg, "API error 401"),
+		strings.Contains(msg, "API error 403"),
+		strings.Contains(msg, "API error 402"), // Payment Required — subscription expired
+		strings.Contains(msg, "API error 404"): // typically a deleted model
+		// Permanent per-session failures: auth, payment, missing resource.
+		// Disable STT for the rest of the session rather than burn more
+		// provider calls that will all re-fail. Config reload via pod
+		// restart is required to re-enable.
 		t.sttDisabled.Store(true)
-		t.log.Error("voice: STT auth failure — disabling for session", "err", err)
+		t.log.Error("voice: STT permanent failure — disabling for session", "err", err)
 	case strings.Contains(msg, "API error 429"):
-		// Quota: open a 60s circuit and drop in-flight work.
-		deadline := time.Now().Add(60 * time.Second).UnixNano()
-		t.circuitOpen.Store(deadline)
+		// Quota: open a 60s circuit and drop in-flight work. If a circuit
+		// is already open further into the future (e.g., from rapid 429s
+		// or concurrent workers), keep the later deadline rather than
+		// shortening it — successive 429s during a single outage would
+		// otherwise reset the window each time.
+		newDeadline := time.Now().Add(60 * time.Second).UnixNano()
+		for {
+			existing := t.circuitOpen.Load()
+			if existing >= newDeadline {
+				break // already open for at least as long
+			}
+			if t.circuitOpen.CompareAndSwap(existing, newDeadline) {
+				break
+			}
+		}
 		t.log.Warn("voice: STT quota 429 — circuit open 60s",
 			"ssrc", u.ssrc, "duration_ms", u.durationMs)
 	default:
@@ -223,7 +248,7 @@ func (t *transcriber) handleSTTError(err error, u utterance) {
 // postTranscript sends "<DisplayName>: <text>" to the configured transcript
 // channel. DisplayName is cached to avoid a GuildMember API call per line.
 func (t *transcriber) postTranscript(ctx context.Context, u utterance, text string) {
-	name := t.resolveDisplayName(u.ssrc, u.userID)
+	name := t.resolveDisplayName(ctx, u.ssrc, u.userID)
 	line := fmt.Sprintf("%s: %s", name, strings.TrimSpace(text))
 	// Discord message cap is 2000 chars. Scribe utterances are ≤10s; even
 	// speedtalkers rarely exceed a few hundred chars per utterance, so cut
@@ -231,7 +256,16 @@ func (t *transcriber) postTranscript(ctx context.Context, u utterance, text stri
 	if len(line) > 1900 {
 		line = line[:1897] + "..."
 	}
-	if _, err := t.session.ChannelMessageSend(t.cfg.TranscriptChannelID, line); err != nil {
+	// Per-call timeout prevents a Discord REST stall from pinning the worker
+	// and backing up the utterance queue (demux would start dropping at
+	// capacity if this blocked too long).
+	postCtx, cancel := context.WithTimeout(ctx, channelSendTimeout)
+	defer cancel()
+	if _, err := t.session.ChannelMessageSend(
+		t.cfg.TranscriptChannelID,
+		line,
+		discordgo.WithContext(postCtx),
+	); err != nil {
 		// A missing channel (10003) or missing-permissions response happens
 		// if the channel was deleted or perms changed mid-session. Accepted
 		// v1 behaviour: warn-log, keep running. If the channel stays gone,
@@ -240,12 +274,11 @@ func (t *transcriber) postTranscript(ctx context.Context, u utterance, text stri
 		t.log.Warn("voice: transcript post failed",
 			"err", err, "channel_id", t.cfg.TranscriptChannelID, "ssrc", u.ssrc)
 	}
-	_ = ctx // reserved for request cancellation if we add per-post timeouts
 }
 
 // resolveDisplayName returns a human-readable speaker label. Falls back to
 // "user:<ssrc>" when GuildMember is unavailable and userID is empty.
-func (t *transcriber) resolveDisplayName(ssrc uint32, userID string) string {
+func (t *transcriber) resolveDisplayName(ctx context.Context, ssrc uint32, userID string) string {
 	if userID == "" {
 		return fmt.Sprintf("user:%d", ssrc)
 	}
@@ -254,8 +287,11 @@ func (t *transcriber) resolveDisplayName(ssrc uint32, userID string) string {
 	}
 	// GuildMember is a REST call; ~50-200ms. Running it from the transcriber
 	// worker (not the drain loop) is safe; the worker is already the slow
-	// path. Cache on success and on not-found to avoid hammering.
-	member, err := t.session.GuildMember(t.cfg.GuildID, userID)
+	// path. Cache on success and on not-found to avoid hammering. Bounded
+	// timeout so a Discord REST stall can't pin the worker.
+	lookupCtx, cancel := context.WithTimeout(ctx, guildMemberTimeout)
+	defer cancel()
+	member, err := t.session.GuildMember(t.cfg.GuildID, userID, discordgo.WithContext(lookupCtx))
 	if err != nil || member == nil {
 		t.log.Debug("voice: GuildMember lookup failed; falling back to userID",
 			"err", err, "user_id", userID)
@@ -312,26 +348,31 @@ func (t *transcriber) sweepLoop(ctx context.Context) {
 }
 
 func (t *transcriber) sweepOnce(now time.Time) {
+	// Orphan ogg tmpfiles.
 	entries, err := os.ReadDir(t.tmpDir)
 	if err != nil {
 		t.log.Debug("voice: tmpDir read failed in sweeper", "err", err, "tmp_dir", t.tmpDir)
-		return
+	} else {
+		cutoff := now.Add(-orphanMaxAge)
+		for _, e := range entries {
+			name := e.Name()
+			if !strings.HasPrefix(name, orphanFilePrefix) || !strings.HasSuffix(name, ".ogg") {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil || info.ModTime().After(cutoff) {
+				continue
+			}
+			p := filepath.Join(t.tmpDir, name)
+			if rerr := os.Remove(p); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				t.log.Debug("voice: orphan sweep remove failed", "err", rerr, "path", p)
+			}
+		}
 	}
-	cutoff := now.Add(-orphanMaxAge)
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasPrefix(name, orphanFilePrefix) || !strings.HasSuffix(name, ".ogg") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil || info.ModTime().After(cutoff) {
-			continue
-		}
-		p := filepath.Join(t.tmpDir, name)
-		if rerr := os.Remove(p); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-			t.log.Debug("voice: orphan sweep remove failed", "err", rerr, "path", p)
-		}
-	}
+	// Expired display-name cache entries — prevents unbounded growth from
+	// speaker churn over a long session (get() only evicts on read, so
+	// silent speakers who never speak again leak their entry otherwise).
+	t.nameCache.sweepExpired()
 }
 
 // ---- display-name cache ---------------------------------------------------
@@ -371,6 +412,22 @@ func (c *displayNameCache) set(userID, name string) {
 	c.m[userID] = nameEntry{name: name, expires: c.now().Add(displayNameTTL)}
 }
 
+// sweepExpired drops every entry whose TTL has elapsed. Without this, a
+// long-lived session with speaker churn grows the cache unboundedly —
+// get() only evicts the key being read, so silent speakers who never
+// speak again leak their entry indefinitely. Called from the transcriber's
+// sweepLoop on the same cadence as the tmpfile sweeper.
+func (c *displayNameCache) sweepExpired() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	for k, e := range c.m {
+		if now.After(e.expires) {
+			delete(c.m, k)
+		}
+	}
+}
+
 // ---- daily cap counter ----------------------------------------------------
 
 // dailyCapCounter tracks cumulative audio-seconds transcribed per UTC day.
@@ -399,6 +456,13 @@ func newDailyCapCounter(capSeconds int) *dailyCapCounter {
 func (d *dailyCapCounter) tryConsume(durMs int) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	// capMs <= 0 means "unlimited" (the feature is effectively disabled from
+	// a cost-bounding perspective). Production paths go through ApplyDefaults
+	// which sets 7200s, but defensive test/builder code that constructs a
+	// counter with 0 capSeconds must not accidentally block every utterance.
+	if d.capMs <= 0 {
+		return true
+	}
 	today := d.nowFn().Format("2006-01-02")
 	if today != d.day {
 		d.day = today

@@ -35,18 +35,18 @@ const (
 // Channel connects to Discord via the Bot API using gateway events.
 type Channel struct {
 	*channels.BaseChannel
-	session         *discordgo.Session
-	config          config.DiscordConfig
-	botUserID       string   // populated on start
-	applicationID   string   // populated on start; required for slash-command registration
-	testGuildID     string   // optional: dev-only guild for instant command propagation (empty = global)
-	placeholders    sync.Map // placeholderKey string → messageID string
-	typingCtrls     sync.Map // channelID string → *typing.Controller
-	interactionTokens sync.Map // discord interaction ID string → *interactionEcho (reply via interaction token)
-	agentStore      store.AgentStore            // for agent key lookup (nil = writer commands disabled)
-	configPermStore store.ConfigPermissionStore // for group file writer management (nil = writer commands disabled)
-	audioMgr        *audio.Manager             // unified STT via audio.Manager (nil = no STT)
-	voiceSupervisor *voice.Supervisor           // real-time voice-channel join + transcription (nil = disabled)
+	session           *discordgo.Session
+	config            config.DiscordConfig
+	botUserID         string                      // populated on start
+	applicationID     string                      // populated on start; required for slash-command registration
+	testGuildID       string                      // optional: dev-only guild for instant command propagation (empty = global)
+	placeholders      sync.Map                    // placeholderKey string → messageID string
+	typingCtrls       sync.Map                    // channelID string → *typing.Controller
+	interactionTokens sync.Map                    // discord interaction ID string → *interactionEcho (reply via interaction token)
+	agentStore        store.AgentStore            // for agent key lookup (nil = writer commands disabled)
+	configPermStore   store.ConfigPermissionStore // for group file writer management (nil = writer commands disabled)
+	audioMgr          *audio.Manager              // unified STT via audio.Manager (nil = no STT)
+	voiceSupervisor   *voice.Supervisor           // real-time voice-channel join + transcription (nil = disabled)
 	// pairingService, pairingDebounce, approvedGroups, groupHistory, historyLimit, requireMention
 	// are inherited from channels.BaseChannel.
 }
@@ -241,9 +241,16 @@ func (c *Channel) SetPendingHistoryTenantID(id uuid.UUID) {
 // down first so its Disconnect call can drain cleanly before the session
 // websocket closes — discordgo doesn't reliably reap voice goroutines
 // otherwise.
+//
+// Voice teardown gets a 10s deadline. Longer than most Discord round-trips,
+// short enough that a wedged voice goroutine doesn't block the entire bot
+// shutdown. If the caller already passed a ctx with a deadline, we honor
+// the tighter of the two.
 func (c *Channel) Stop(ctx context.Context) error {
 	if c.voiceSupervisor != nil {
-		c.voiceSupervisor.Stop(ctx)
+		voiceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		c.voiceSupervisor.Stop(voiceCtx)
+		cancel()
 		c.voiceSupervisor = nil
 	}
 	c.GroupHistory().StopFlusher()
