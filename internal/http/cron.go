@@ -1,9 +1,11 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -65,6 +67,14 @@ func (h *CronHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	managedBy := r.URL.Query().Get("managedBy")
 	managedKey := r.URL.Query().Get("managedKey")
 
+	if !cronCallerCanSeeAll(r.Context()) {
+		userID = store.UserIDFromContext(r.Context())
+		if userID == "" {
+			writeError(w, http.StatusForbidden, protocol.ErrUnauthorized, "cron job access denied")
+			return
+		}
+	}
+
 	jobs := h.store.ListJobs(r.Context(), includeDisabled, agentID, userID)
 	if managedBy != "" || managedKey != "" {
 		filtered := jobs[:0]
@@ -103,7 +113,18 @@ func (h *CronHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, err := h.store.AddJob(r.Context(), req.Name, req.Schedule, req.Message, req.Deliver, req.DeliverChannel, req.DeliverTo, req.AgentID, req.UserID)
+	userID := req.UserID
+	if !cronCallerCanSeeAll(r.Context()) {
+		userID = store.UserIDFromContext(r.Context())
+		if userID == "" {
+			writeError(w, http.StatusForbidden, protocol.ErrUnauthorized, "cron job access denied")
+			return
+		}
+	} else if userID == "" {
+		userID = store.UserIDFromContext(r.Context())
+	}
+
+	job, err := h.store.AddJob(r.Context(), req.Name, req.Schedule, req.Message, req.Deliver, req.DeliverChannel, req.DeliverTo, req.AgentID, userID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, protocol.ErrInternal, err.Error())
 		return
@@ -123,8 +144,12 @@ func (h *CronHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		patch.Model = &req.Model
 	}
 	if req.Enabled != nil || req.Managed != nil || req.DeleteAfterRun != nil || req.Stateless != nil || req.WakeHeartbeat != nil || patch.Provider != nil || patch.Model != nil {
-		job, err = h.store.UpdateJob(r.Context(), job.ID, patch)
+		jobID := job.ID
+		job, err = h.store.UpdateJob(r.Context(), jobID, patch)
 		if err != nil {
+			if rmErr := h.store.RemoveJob(r.Context(), jobID); rmErr != nil {
+				slog.Warn("cron.create rollback failed", "job_id", jobID, "error", rmErr)
+			}
 			writeError(w, http.StatusInternalServerError, protocol.ErrInternal, err.Error())
 			return
 		}
@@ -138,6 +163,9 @@ func (h *CronHandler) handlePatch(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("id")
 	if jobID == "" {
 		writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest, "job id is required")
+		return
+	}
+	if !h.authorizeCronJob(w, r.Context(), jobID) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxCronRequestBody)
@@ -160,6 +188,9 @@ func (h *CronHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest, "job id is required")
 		return
 	}
+	if !h.authorizeCronJob(w, r.Context(), jobID) {
+		return
+	}
 	if err := h.store.RemoveJob(r.Context(), jobID); err != nil {
 		writeCronStoreError(w, err)
 		return
@@ -172,6 +203,9 @@ func (h *CronHandler) handleToggle(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("id")
 	if jobID == "" {
 		writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest, "job id is required")
+		return
+	}
+	if !h.authorizeCronJob(w, r.Context(), jobID) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxCronRequestBody)
@@ -196,6 +230,9 @@ func (h *CronHandler) handleRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest, "job id is required")
 		return
 	}
+	if !h.authorizeCronJob(w, r.Context(), jobID) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxCronRequestBody)
 
 	var req struct {
@@ -210,18 +247,22 @@ func (h *CronHandler) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	force := req.Force || req.Mode == "force"
-	ran, reason, err := h.store.RunJob(r.Context(), jobID, force)
-	if err != nil {
-		writeCronStoreError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ran": ran, "reason": reason})
+	runCtx := context.WithoutCancel(r.Context())
+	go func() {
+		if _, _, err := h.store.RunJob(runCtx, jobID, force); err != nil {
+			slog.Warn("cron.run background error", "job_id", jobID, "error", err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "ran": true})
 }
 
 func (h *CronHandler) handleRuns(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("id")
 	if jobID == "" {
 		writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest, "job id is required")
+		return
+	}
+	if !h.authorizeCronJob(w, r.Context(), jobID) {
 		return
 	}
 	limit := parseIntQuery(r, "limit", 50)
@@ -261,4 +302,29 @@ func writeCronStoreError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusInternalServerError, protocol.ErrInternal, err.Error())
+}
+
+func cronCallerCanSeeAll(ctx context.Context) bool {
+	return permissions.HasMinRole(permissions.Role(store.RoleFromContext(ctx)), permissions.RoleAdmin)
+}
+
+func (h *CronHandler) authorizeCronJob(w http.ResponseWriter, ctx context.Context, jobID string) bool {
+	if cronCallerCanSeeAll(ctx) {
+		return true
+	}
+	userID := store.UserIDFromContext(ctx)
+	if userID == "" {
+		writeError(w, http.StatusForbidden, protocol.ErrUnauthorized, "cron job access denied")
+		return false
+	}
+	job, ok := h.store.GetJob(ctx, jobID)
+	if !ok {
+		writeError(w, http.StatusNotFound, protocol.ErrNotFound, store.ErrCronJobNotFound.Error())
+		return false
+	}
+	if job.UserID != userID {
+		writeError(w, http.StatusForbidden, protocol.ErrUnauthorized, "cron job access denied")
+		return false
+	}
+	return true
 }

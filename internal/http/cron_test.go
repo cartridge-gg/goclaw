@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +26,7 @@ func TestCronHandlerCreatePersistsOverrides(t *testing.T) {
 		"provider":"openai",
 		"model":"gpt-5.5"
 	}`))
+	req = req.WithContext(store.WithRole(req.Context(), "admin"))
 	rec := httptest.NewRecorder()
 
 	handler.handleCreate(rec, req)
@@ -54,6 +56,7 @@ func TestCronHandlerListFiltersManagedJobs(t *testing.T) {
 	handler := NewCronHandler(fakeStore)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/cron?includeDisabled=true&managedBy=gillen&managedKey=one", nil)
+	req = req.WithContext(store.WithRole(req.Context(), "admin"))
 	rec := httptest.NewRecorder()
 
 	handler.handleList(rec, req)
@@ -72,6 +75,105 @@ func TestCronHandlerListFiltersManagedJobs(t *testing.T) {
 	}
 }
 
+func TestCronHandlerListScopesOperatorToContextUser(t *testing.T) {
+	fakeStore := newFakeCronStore()
+	fakeStore.jobs["a"] = fakeJobWithUser("a", "alice")
+	fakeStore.jobs["b"] = fakeJobWithUser("b", "bob")
+	handler := NewCronHandler(fakeStore)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/cron?includeDisabled=true&userId=bob", nil)
+	ctx := store.WithUserID(store.WithRole(req.Context(), "operator"), "alice")
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	handler.handleList(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Jobs []store.CronJob `json:"jobs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Jobs) != 1 || resp.Jobs[0].UserID != "alice" {
+		t.Fatalf("unexpected scoped jobs: %+v", resp.Jobs)
+	}
+}
+
+func TestCronHandlerCreateUsesOperatorContextUser(t *testing.T) {
+	fakeStore := newFakeCronStore()
+	handler := NewCronHandler(fakeStore)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/cron", strings.NewReader(`{
+		"name":"owned",
+		"userId":"bob",
+		"schedule":{"kind":"cron","expr":"0 9 * * *","tz":"UTC"},
+		"message":"run"
+	}`))
+	ctx := store.WithUserID(store.WithRole(req.Context(), "operator"), "alice")
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	handler.handleCreate(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := fakeStore.jobs["job-1"].UserID; got != "alice" {
+		t.Fatalf("expected context user alice, got %q", got)
+	}
+}
+
+func TestCronHandlerRejectsOperatorMutatingOtherUserJob(t *testing.T) {
+	fakeStore := newFakeCronStore()
+	fakeStore.jobs["job-1"] = fakeJobWithUser("job-1", "bob")
+	handler := NewCronHandler(fakeStore)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/cron/job-1", nil)
+	req.SetPathValue("id", "job-1")
+	ctx := store.WithUserID(store.WithRole(req.Context(), "operator"), "alice")
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	handler.handleDelete(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if fakeStore.jobs["job-1"] == nil {
+		t.Fatal("expected unauthorized delete to leave job intact")
+	}
+}
+
+func TestCronHandlerCreateRollsBackFailedOverridePatch(t *testing.T) {
+	fakeStore := newFakeCronStore()
+	fakeStore.updateErr = errors.New("patch failed")
+	handler := NewCronHandler(fakeStore)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/cron", strings.NewReader(`{
+		"name":"rollback",
+		"schedule":{"kind":"cron","expr":"0 9 * * *","tz":"UTC"},
+		"message":"run",
+		"provider":"provider-name-that-fails"
+	}`))
+	req = req.WithContext(store.WithRole(req.Context(), "admin"))
+	rec := httptest.NewRecorder()
+
+	handler.handleCreate(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if fakeStore.jobs["job-1"] != nil {
+		t.Fatal("expected failed override patch to roll back created job")
+	}
+	if fakeStore.removeCalls != 1 {
+		t.Fatalf("expected one rollback remove, got %d", fakeStore.removeCalls)
+	}
+}
+
 func fakeJob(id, by, key string) *store.CronJob {
 	return &store.CronJob{
 		ID:      id,
@@ -86,9 +188,17 @@ func fakeJob(id, by, key string) *store.CronJob {
 	}
 }
 
+func fakeJobWithUser(id, userID string) *store.CronJob {
+	job := fakeJob(id, "gillen", id)
+	job.UserID = userID
+	return job
+}
+
 type fakeCronStore struct {
-	jobs  map[string]*store.CronJob
-	onJob func(job *store.CronJob) (*store.CronJobResult, error)
+	jobs        map[string]*store.CronJob
+	onJob       func(job *store.CronJob) (*store.CronJobResult, error)
+	updateErr   error
+	removeCalls int
 }
 
 func newFakeCronStore() *fakeCronStore {
@@ -135,11 +245,15 @@ func (s *fakeCronStore) ListJobs(_ context.Context, includeDisabled bool, agentI
 }
 
 func (s *fakeCronStore) RemoveJob(_ context.Context, jobID string) error {
+	s.removeCalls++
 	delete(s.jobs, jobID)
 	return nil
 }
 
 func (s *fakeCronStore) UpdateJob(_ context.Context, jobID string, patch store.CronJobPatch) (*store.CronJob, error) {
+	if s.updateErr != nil {
+		return nil, s.updateErr
+	}
 	job := s.jobs[jobID]
 	if job == nil {
 		return nil, store.ErrCronJobNotFound

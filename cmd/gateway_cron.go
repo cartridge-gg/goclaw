@@ -66,7 +66,7 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 		if job.Provider != "" && providerRegistry != nil {
 			prov, err := providerRegistry.GetForTenant(job.TenantID, job.Provider)
 			if err != nil {
-				slog.Warn("cron: configured provider override not found", "job_id", job.ID, "provider", job.Provider, "error", err)
+				return nil, fmt.Errorf("configured provider override %q not found: %w", job.Provider, err)
 			} else {
 				providerOverride = prov
 			}
