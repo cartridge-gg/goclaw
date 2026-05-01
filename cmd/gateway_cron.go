@@ -63,12 +63,17 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 		channelType := resolveChannelType(channelMgr, channel)
 
 		var providerOverride providers.Provider
-		if job.Provider != "" && providerRegistry != nil {
+		if job.Provider != "" {
+			if providerRegistry == nil {
+				return nil, fmt.Errorf("configured provider override %q cannot be resolved: provider registry unavailable", job.Provider)
+			}
 			prov, err := providerRegistry.GetForTenant(job.TenantID, job.Provider)
 			if err != nil {
 				return nil, fmt.Errorf("configured provider override %q not found: %w", job.Provider, err)
-			} else {
-				providerOverride = prov
+			}
+			providerOverride = prov
+			if job.Model == "" {
+				job.Model = prov.DefaultModel()
 			}
 		}
 
