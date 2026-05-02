@@ -219,6 +219,44 @@ func TestSpawnJob_HappyPath(t *testing.T) {
 	}
 }
 
+func TestSpawnJobJSONContract(t *testing.T) {
+	req := SpawnJobRequest{
+		JobID:         "11111111-2222-3333-4444-555555555555",
+		Kind:          "impl",
+		Command:       "forge",
+		Args:          []string{"-p", "implement the thing"},
+		Cwd:           "/data/workspace-eng/worktrees/task-1",
+		WorkspaceRoot: "/data/workspace-eng",
+		WorktreePath:  "/data/workspace-eng/worktrees/task-1",
+		Timeout:       "45m",
+		Resources: JobResources{
+			CPURequest:    "500m",
+			CPULimit:      "2",
+			MemoryRequest: "1Gi",
+			MemoryLimit:   "4Gi",
+		},
+		Env: map[string]string{
+			"AGENT_MODE": "eng",
+			"FOO":        "bar",
+		},
+		Sinks: []JobSink{
+			{Type: "discord", Channel: "discord-eng", ThreadID: "1217"},
+			{Type: "github_check", Owner: "cartridge-gg", Repo: "internal", CheckRunID: 99},
+			{Type: "github_pr_review", Owner: "cartridge-gg", Repo: "internal", PRNumber: 77},
+		},
+		TenantID:      "tenant-1",
+		ParentSession: "agent:eng:discord-eng:group:1217",
+	}
+	got, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"job_id":"11111111-2222-3333-4444-555555555555","kind":"impl","command":"forge","args":["-p","implement the thing"],"cwd":"/data/workspace-eng/worktrees/task-1","workspace_root":"/data/workspace-eng","worktree_path":"/data/workspace-eng/worktrees/task-1","timeout":"45m","resources":{"cpu_request":"500m","cpu_limit":"2","memory_request":"1Gi","memory_limit":"4Gi"},"env":{"AGENT_MODE":"eng","FOO":"bar"},"sinks":[{"type":"discord","channel":"discord-eng","thread_id":"1217"},{"type":"github_check","owner":"cartridge-gg","repo":"internal","check_run_id":99},{"type":"github_pr_review","owner":"cartridge-gg","repo":"internal","pr_number":77}],"tenant_id":"tenant-1","parent_session_key":"agent:eng:discord-eng:group:1217"}`
+	if string(got) != want {
+		t.Fatalf("spawn_job JSON contract drifted:\n got: %s\nwant: %s", got, want)
+	}
+}
+
 func TestSpawnJob_AgentServiceErrorReturned(t *testing.T) {
 	// 5xx from the agent service surfaces to the LLM as an error
 	// result with status code + body excerpt. The row stays as
