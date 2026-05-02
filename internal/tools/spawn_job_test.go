@@ -19,7 +19,7 @@ import (
 )
 
 // fakeSubagentTaskStore is a minimal in-memory implementation. We only
-// need Create + UpdateMetadata for spawn_forge_job; the rest are no-op
+// need Create + UpdateMetadata for spawn_job; the rest are no-op
 // stubs to satisfy the SubagentTaskStore interface.
 type fakeSubagentTaskStore struct {
 	mu          sync.Mutex
@@ -62,16 +62,18 @@ func (f *fakeSubagentTaskStore) Archive(context.Context, time.Duration) (int64, 
 	return 0, nil
 }
 
-// validArgs builds a complete arg map for spawn_forge_job. Tests
+// validArgs builds a complete arg map for spawn_job. Tests
 // override individual fields to exercise validation paths.
 func validArgs() map[string]any {
 	return map[string]any{
-		"phase":         "impl",
-		"forge_prompt":  "do the thing",
+		"kind":          "impl",
+		"command":       "forge",
+		"args":          []any{"-p", "do the thing"},
+		"cwd":           "/data/workspace-eng/worktrees/test-task",
 		"worktree_path": "/data/workspace-eng/worktrees/test-task",
-		"thread_id":     "1217211714185986128",
-		"owner":         "cartridge-gg",
-		"repo":          "controller-rs",
+		"sinks": []any{
+			map[string]any{"type": "discord", "channel": "discord-eng", "thread_id": "1217211714185986128"},
+		},
 	}
 }
 
@@ -88,11 +90,11 @@ func withTenantAndChannel(t *testing.T) context.Context {
 	return ctx
 }
 
-func TestSpawnForgeJob_HMACSecretRequired(t *testing.T) {
+func TestSpawnJob_HMACSecretRequired(t *testing.T) {
 	// Tool registered with empty secret should error cleanly rather
 	// than silently sign with nil key. Operators see the message in
 	// the agent trace; user sees it in Discord.
-	tool := NewSpawnForgeJobTool(&fakeSubagentTaskStore{}, "", nil)
+	tool := NewSpawnJobTool(&fakeSubagentTaskStore{}, "", nil)
 	res := tool.Execute(withTenantAndChannel(t), validArgs())
 	if res == nil || !res.IsError {
 		t.Fatalf("expected error result on missing secret, got %+v", res)
@@ -102,24 +104,24 @@ func TestSpawnForgeJob_HMACSecretRequired(t *testing.T) {
 	}
 }
 
-func TestSpawnForgeJob_InvalidPhase(t *testing.T) {
-	tool := NewSpawnForgeJobTool(&fakeSubagentTaskStore{}, "", []byte("secret"))
+func TestSpawnJob_MissingSink(t *testing.T) {
+	tool := NewSpawnJobTool(&fakeSubagentTaskStore{}, "", []byte("secret"))
 	args := validArgs()
-	args["phase"] = "deploy" // not in the enum
+	delete(args, "sinks")
 	res := tool.Execute(withTenantAndChannel(t), args)
 	if res == nil || !res.IsError {
-		t.Fatal("expected error for invalid phase")
+		t.Fatal("expected error for missing sink")
 	}
-	if !strings.Contains(res.ForLLM, "phase must be one of") {
-		t.Errorf("error should mention phase enum, got %q", res.ForLLM)
+	if !strings.Contains(res.ForLLM, "sink") {
+		t.Errorf("error should mention sink, got %q", res.ForLLM)
 	}
 }
 
-func TestSpawnForgeJob_RequiredFields(t *testing.T) {
-	cases := []string{"forge_prompt", "worktree_path", "thread_id", "owner", "repo"}
+func TestSpawnJob_RequiredFields(t *testing.T) {
+	cases := []string{"kind", "command", "worktree_path"}
 	for _, missing := range cases {
 		t.Run("missing_"+missing, func(t *testing.T) {
-			tool := NewSpawnForgeJobTool(&fakeSubagentTaskStore{}, "", []byte("secret"))
+			tool := NewSpawnJobTool(&fakeSubagentTaskStore{}, "", []byte("secret"))
 			args := validArgs()
 			delete(args, missing)
 			res := tool.Execute(withTenantAndChannel(t), args)
@@ -130,9 +132,9 @@ func TestSpawnForgeJob_RequiredFields(t *testing.T) {
 	}
 }
 
-func TestSpawnForgeJob_NoTenantInContext(t *testing.T) {
+func TestSpawnJob_NoTenantInContext(t *testing.T) {
 	// Without a tenant we can't tenant-scope the row write, so refuse.
-	tool := NewSpawnForgeJobTool(&fakeSubagentTaskStore{}, "", []byte("secret"))
+	tool := NewSpawnJobTool(&fakeSubagentTaskStore{}, "", []byte("secret"))
 	ctx := WithToolChannel(context.Background(), "discord-eng")
 	ctx = WithToolChatID(ctx, "1217")
 	res := tool.Execute(ctx, validArgs())
@@ -144,10 +146,10 @@ func TestSpawnForgeJob_NoTenantInContext(t *testing.T) {
 	}
 }
 
-func TestSpawnForgeJob_NoChannelInContext(t *testing.T) {
+func TestSpawnJob_NoChannelInContext(t *testing.T) {
 	// Without a channel in ctx the completion callback would have
 	// nowhere to post, so refuse before any state writes.
-	tool := NewSpawnForgeJobTool(&fakeSubagentTaskStore{}, "", []byte("secret"))
+	tool := NewSpawnJobTool(&fakeSubagentTaskStore{}, "", []byte("secret"))
 	ctx := store.WithTenantID(context.Background(), uuid.New())
 	res := tool.Execute(ctx, validArgs())
 	if res == nil || !res.IsError {
@@ -155,7 +157,7 @@ func TestSpawnForgeJob_NoChannelInContext(t *testing.T) {
 	}
 }
 
-func TestSpawnForgeJob_HappyPath(t *testing.T) {
+func TestSpawnJob_HappyPath(t *testing.T) {
 	// End-to-end: the tool should HMAC-sign the body, POST to the
 	// fake agent service, write a subagent_tasks row, then patch
 	// the row's metadata with the returned k8s job name.
@@ -165,7 +167,7 @@ func TestSpawnForgeJob_HappyPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedSig = r.Header.Get("X-Hub-Signature-256")
 		receivedBody, _ = io.ReadAll(r.Body)
-		_ = json.NewEncoder(w).Encode(SpawnForgeJobResponse{
+		_ = json.NewEncoder(w).Encode(SpawnJobResponse{
 			JobID:      uuid.New().String(),
 			K8sJobName: "job-impl-deadbeef",
 			K8sJobUID:  "uid-1",
@@ -173,7 +175,7 @@ func TestSpawnForgeJob_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewSpawnForgeJobTool(taskStore, srv.URL, []byte("topsecret"))
+	tool := NewSpawnJobTool(taskStore, srv.URL, []byte("topsecret"))
 	res := tool.Execute(withTenantAndChannel(t), validArgs())
 	if res == nil || res.IsError {
 		t.Fatalf("expected success, got %+v", res)
@@ -187,8 +189,8 @@ func TestSpawnForgeJob_HappyPath(t *testing.T) {
 	if row.Status != "running" {
 		t.Errorf("row status: got %q want running", row.Status)
 	}
-	if row.Metadata["phase"] != "impl" {
-		t.Errorf("metadata phase: got %v want impl", row.Metadata["phase"])
+	if row.Metadata["kind"] != "impl" {
+		t.Errorf("metadata kind: got %v want impl", row.Metadata["kind"])
 	}
 	if row.Metadata["worktree_path"] != "/data/workspace-eng/worktrees/test-task" {
 		t.Errorf("metadata worktree_path lost")
@@ -217,7 +219,7 @@ func TestSpawnForgeJob_HappyPath(t *testing.T) {
 	}
 }
 
-func TestSpawnForgeJob_AgentServiceErrorReturned(t *testing.T) {
+func TestSpawnJob_AgentServiceErrorReturned(t *testing.T) {
 	// 5xx from the agent service surfaces to the LLM as an error
 	// result with status code + body excerpt. The row stays as
 	// 'running' — recovery loop will catch it on next pod start.
@@ -228,7 +230,7 @@ func TestSpawnForgeJob_AgentServiceErrorReturned(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewSpawnForgeJobTool(taskStore, srv.URL, []byte("topsecret"))
+	tool := NewSpawnJobTool(taskStore, srv.URL, []byte("topsecret"))
 	res := tool.Execute(withTenantAndChannel(t), validArgs())
 	if res == nil || !res.IsError {
 		t.Fatalf("expected error result on 500, got %+v", res)
@@ -242,7 +244,7 @@ func TestSpawnForgeJob_AgentServiceErrorReturned(t *testing.T) {
 	}
 }
 
-func TestSpawnForgeJob_RowWriteFailureSkipsPost(t *testing.T) {
+func TestSpawnJob_RowWriteFailureSkipsPost(t *testing.T) {
 	// If the row write fails, refuse to POST. Otherwise we'd create
 	// a Job we can't track, with nothing in the recovery loop to
 	// clean it up.
@@ -253,7 +255,7 @@ func TestSpawnForgeJob_RowWriteFailureSkipsPost(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewSpawnForgeJobTool(taskStore, srv.URL, []byte("topsecret"))
+	tool := NewSpawnJobTool(taskStore, srv.URL, []byte("topsecret"))
 	res := tool.Execute(withTenantAndChannel(t), validArgs())
 	if res == nil || !res.IsError {
 		t.Fatal("expected error on row write failure")
