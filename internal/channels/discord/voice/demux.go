@@ -303,6 +303,13 @@ func (d *demux) flushSSRC(ssrc uint32, reason string) {
 		return
 	}
 
+	if likely, smallFrames, avgBytes := likelyLowInformationOpus(u.opusFrames); likely {
+		d.log.Warn("voice: drop low-information utterance before STT",
+			"ssrc", ssrc, "duration_ms", u.durationMs, "frames", len(u.opusFrames),
+			"small_frames", smallFrames, "avg_frame_bytes", avgBytes, "reason", reason)
+		return
+	}
+
 	// Non-blocking send: if the transcriber queue is full, drop and count.
 	// Blocking would back-pressure the speaking-update handler, which
 	// discordgo dispatches on a shared goroutine; a slow STT could then
