@@ -505,7 +505,7 @@ func (s *Supervisor) onJoinSuccess(vc *discordgo.VoiceConnection) {
 	// complete on a tail-latency network, short enough that a wedged call
 	// doesn't keep the session half-wired.
 	setupCtx, cancelSetup := context.WithTimeout(context.Background(), 10*time.Second)
-	output := newSessionOutput(setupCtx, s.session, s.cfg.TranscriptChannelID, s.cfg.VoiceChannelID, s.log, s.cfg.TranscriptSummarizer)
+	output := newSessionOutput(setupCtx, s.session, s.cfg.TranscriptChannelID, s.cfg.VoiceChannelID, s.resolvedGuildID, s.log, s.cfg.TranscriptSummarizer)
 	cancelSetup()
 	startedAt := s.nowFn()
 

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -61,7 +62,7 @@ const memoryContextHeader = `\n\n--- Memory context (use these to ground names +
 //
 // Returns nil if cfg is nil or has no Provider — callers treat nil as
 // "no summarizer wired" and fall back to the legacy stats line.
-func BuildVoiceTranscriptSummarizer(cfg *VoiceTranscriptSummarizerConfig) func(ctx context.Context, transcript string) (string, error) {
+func BuildVoiceTranscriptSummarizer(cfg *VoiceTranscriptSummarizerConfig) func(ctx context.Context, transcript string, meta VoiceTranscriptSummaryMeta) (string, error) {
 	if cfg == nil || cfg.Provider == nil || cfg.Model == "" {
 		return nil
 	}
@@ -81,7 +82,7 @@ func BuildVoiceTranscriptSummarizer(cfg *VoiceTranscriptSummarizerConfig) func(c
 		systemPrompt = defaultVoiceSummaryPrompt
 	}
 
-	return func(ctx context.Context, transcript string) (string, error) {
+	return func(ctx context.Context, transcript string, meta VoiceTranscriptSummaryMeta) (string, error) {
 		t := strings.TrimSpace(transcript)
 		if t == "" {
 			return "", errors.New("voice summarizer: empty transcript")
@@ -138,7 +139,7 @@ func BuildVoiceTranscriptSummarizer(cfg *VoiceTranscriptSummarizerConfig) func(c
 		// fails. The disk seeder picks up the new file on its next
 		// sweep (see internal/memory/disk_seeder.go).
 		if cfg.SessionOutputDir != "" && cfg.MemoryStore != nil && cfg.MemoryAgentID != "" && cfg.MemoryWorkspace != "" {
-			if err := persistSessionSummary(ctx, cfg, summary); err != nil {
+			if err := persistSessionSummary(ctx, cfg, summary, meta); err != nil {
 				slog.Warn("voice summarizer: persist memory failed", "err", err)
 			}
 		}
@@ -455,29 +456,27 @@ func uniqueSpeakers(transcript string) []string {
 }
 
 // persistSessionSummary writes the new summary to a memory file under
-// <workspace>/memory/<session_output_dir>/<YYYY-MM-DD>/<HHMM>-session.md
+// <workspace>/memory/<session_output_dir>/<YYYY-MM-DD>/<HHMM>-<channel>.md
 // with Obsidian-style frontmatter. The disk seeder's next sweep
 // indexes it; future sessions can find it via memory_search.
-//
-// Path strategy: timestamp-based + a "session" suffix because the
-// summarizer doesn't always know the channel name. Callers that want
-// a richer path can override by writing a wrapper (e.g. internal.voice
-// can pass a synthetic channel hint via Extra metadata in the future).
-func persistSessionSummary(ctx context.Context, cfg *VoiceTranscriptSummarizerConfig, summary string) error {
-	now := time.Now().UTC()
+func persistSessionSummary(ctx context.Context, cfg *VoiceTranscriptSummarizerConfig, summary string, meta VoiceTranscriptSummaryMeta) error {
+	now := meta.EndedAt
+	if now.IsZero() {
+		now = time.Now()
+	}
+	now = now.UTC()
 	dateDir := now.Format("2006-01-02")
-	fileName := now.Format("1504") + "-session.md"
+	channelSlug := slugifyVoiceSummaryPath(meta.VoiceChannelName)
+	if channelSlug == "" {
+		channelSlug = slugifyVoiceSummaryPath(meta.VoiceChannelID)
+	}
+	if channelSlug == "" {
+		channelSlug = "session"
+	}
+	fileName := now.Format("1504") + "-" + channelSlug + ".md"
 	relPath := filepath.ToSlash(filepath.Join("memory", cfg.SessionOutputDir, dateDir, fileName))
 
-	body := fmt.Sprintf(`---
-title: Voice session — %s
-type: voice-session
-updated: "%s"
-tags: [voice]
----
-
-%s
-`, now.Format("2006-01-02 15:04 UTC"), now.Format("2006-01-02"), summary)
+	body := buildVoiceSessionMemoryNote(summary, meta, now)
 
 	// Write through the MemoryStore so it lands in memory_documents +
 	// gets indexed; the next disk sweep is what brings it onto disk
@@ -500,4 +499,127 @@ tags: [voice]
 		}
 	}
 	return nil
+}
+
+func buildVoiceSessionMemoryNote(summary string, meta VoiceTranscriptSummaryMeta, endedAt time.Time) string {
+	if endedAt.IsZero() {
+		endedAt = time.Now().UTC()
+	}
+	startedAt := meta.StartedAt
+	if startedAt.IsZero() {
+		startedAt = endedAt
+	}
+	startedAt = startedAt.UTC()
+	endedAt = endedAt.UTC()
+
+	titleChannel := meta.VoiceChannelName
+	if titleChannel == "" {
+		titleChannel = meta.VoiceChannelID
+	}
+	if titleChannel == "" {
+		titleChannel = "Voice"
+	}
+	title := fmt.Sprintf("%s voice session - %s", titleChannel, endedAt.Format("2006-01-02 15:04 UTC"))
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "---\n")
+	fmt.Fprintf(&b, "title: %s\n", yamlQuote(title))
+	fmt.Fprintf(&b, "type: voice-session\n")
+	fmt.Fprintf(&b, "created: %s\n", yamlQuote(startedAt.Format(time.RFC3339)))
+	fmt.Fprintf(&b, "updated: %s\n", yamlQuote(endedAt.Format(time.RFC3339)))
+	fmt.Fprintf(&b, "date: %s\n", yamlQuote(endedAt.Format("2006-01-02")))
+	fmt.Fprintf(&b, "source: discord\n")
+	fmt.Fprintf(&b, "channel: %s\n", yamlQuote(titleChannel))
+	if meta.VoiceChannelID != "" {
+		fmt.Fprintf(&b, "channel_id: %s\n", yamlQuote(meta.VoiceChannelID))
+	}
+	if meta.GuildID != "" {
+		fmt.Fprintf(&b, "guild_id: %s\n", yamlQuote(meta.GuildID))
+	}
+	if meta.ThreadChannelID != "" {
+		fmt.Fprintf(&b, "thread_id: %s\n", yamlQuote(meta.ThreadChannelID))
+	}
+	fmt.Fprintf(&b, "duration_seconds: %d\n", int(meta.Duration.Seconds()))
+	fmt.Fprintf(&b, "utterances: %d\n", meta.UtteranceCount)
+	fmt.Fprintf(&b, "participants:\n")
+	for _, speaker := range meta.Speakers {
+		name := strings.TrimSpace(speaker.DisplayName)
+		if name == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "  - %s\n", yamlQuote("[["+name+"]]"))
+	}
+	if source := discordSummaryURL(meta); source != "" {
+		fmt.Fprintf(&b, "sources:\n  - %s\n", yamlQuote(source))
+	}
+	if links := summaryWikilinks(summary); len(links) > 0 {
+		fmt.Fprintf(&b, "related:\n")
+		for _, link := range links {
+			fmt.Fprintf(&b, "  - %s\n", yamlQuote("[["+link+"]]"))
+		}
+	}
+	fmt.Fprintf(&b, "tags:\n  - voice\n  - discord\n")
+	fmt.Fprintf(&b, "---\n\n")
+	if strings.TrimSpace(summary) != "" {
+		fmt.Fprintf(&b, "## Summary\n\n%s\n", strings.TrimSpace(summary))
+	}
+	return b.String()
+}
+
+func discordSummaryURL(meta VoiceTranscriptSummaryMeta) string {
+	if meta.GuildID == "" || meta.TranscriptChannelID == "" || meta.SummaryMessageID == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://discord.com/channels/%s/%s/%s", meta.GuildID, meta.TranscriptChannelID, meta.SummaryMessageID)
+}
+
+var voiceSummaryWikilinkRE = regexp.MustCompile(`!?\[\[([^\[\]]+)\]\]`)
+
+func summaryWikilinks(summary string) []string {
+	matches := voiceSummaryWikilinkRE.FindAllStringSubmatch(summary, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	links := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		target := strings.TrimSpace(match[1])
+		if before, _, ok := strings.Cut(target, "|"); ok {
+			target = strings.TrimSpace(before)
+		}
+		if target == "" || seen[target] {
+			continue
+		}
+		seen[target] = true
+		links = append(links, target)
+	}
+	return links
+}
+
+func yamlQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
+}
+
+func slugifyVoiceSummaryPath(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		case r == '-' || r == '_' || r == ' ':
+			if !lastDash && b.Len() > 0 {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }

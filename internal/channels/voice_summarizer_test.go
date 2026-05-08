@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
@@ -72,7 +73,7 @@ func TestBuildVoiceTranscriptSummarizer_BasicCall(t *testing.T) {
 		Provider: p,
 		Model:    "stub-model",
 	})
-	got, err := fn(context.Background(), "alice: hi\nbob: hey")
+	got, err := fn(context.Background(), "alice: hi\nbob: hey", VoiceTranscriptSummaryMeta{})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestBuildVoiceTranscriptSummarizer_SkillBodyOverridesPrompt(t *testing.T) {
 		Model:     "stub-model",
 		SkillBody: "Custom skill instructions for this team's vault.",
 	})
-	_, _ = fn(context.Background(), "alice: hi")
+	_, _ = fn(context.Background(), "alice: hi", VoiceTranscriptSummaryMeta{})
 	got := p.lastReq.Messages[0].Content
 	if !strings.HasPrefix(got, "Custom skill instructions") {
 		t.Errorf("skill body not used as prompt; got: %q", got)
@@ -117,7 +118,7 @@ func TestBuildVoiceTranscriptSummarizer_MemoryContextInjected(t *testing.T) {
 		MemoryStore:   mem,
 		MemoryAgentID: "agent-uuid",
 	})
-	_, _ = fn(context.Background(), "alice: hi everyone\nbob: hey")
+	_, _ = fn(context.Background(), "alice: hi everyone\nbob: hey", VoiceTranscriptSummaryMeta{})
 	got := p.lastReq.Messages[0].Content
 	if !strings.Contains(got, "Memory context") || !strings.Contains(got, "Alice is the lead engineer") {
 		t.Errorf("memory context not injected; got: %q", got)
@@ -151,7 +152,7 @@ func TestBuildVoiceTranscriptSummarizer_OrgContextLookupsInjected(t *testing.T) 
 		MemoryStore:   mem,
 		MemoryAgentID: "agent-uuid",
 	})
-	_, _ = fn(context.Background(), "alice: the repo controller-rs needs Starknet API context for the paymaster summary")
+	_, _ = fn(context.Background(), "alice: the repo controller-rs needs Starknet API context for the paymaster summary", VoiceTranscriptSummaryMeta{})
 	got := p.lastReq.Messages[0].Content
 	if !strings.Contains(got, "controller-rs signs sessions") {
 		t.Fatalf("expected controller-rs context injected; prompt: %q", got)
@@ -187,7 +188,7 @@ func Test_contextLookupQueries_extractsProjectLikeTerms(t *testing.T) {
 
 func TestBuildVoiceTranscriptSummarizer_PersistsToMemoryAndDisk(t *testing.T) {
 	tmp := t.TempDir()
-	p := &stubProvider{resp: &providers.ChatResponse{Content: "the summary text"}}
+	p := &stubProvider{resp: &providers.ChatResponse{Content: "the summary text for [[Controller|Controller]]"}}
 	mem := &stubMemoryQueryer{}
 	fn := BuildVoiceTranscriptSummarizer(&VoiceTranscriptSummarizerConfig{
 		Provider:         p,
@@ -197,7 +198,23 @@ func TestBuildVoiceTranscriptSummarizer_PersistsToMemoryAndDisk(t *testing.T) {
 		SessionOutputDir: "voice-sessions",
 		MemoryWorkspace:  tmp,
 	})
-	_, err := fn(context.Background(), "alice: hi\nbob: hey")
+	meta := VoiceTranscriptSummaryMeta{
+		StartedAt:           time.Date(2026, 5, 8, 14, 30, 0, 0, time.UTC),
+		EndedAt:             time.Date(2026, 5, 8, 14, 42, 0, 0, time.UTC),
+		Duration:            12 * time.Minute,
+		GuildID:             "guild-1",
+		VoiceChannelID:      "voice-ch",
+		VoiceChannelName:    "chill",
+		TranscriptChannelID: "transcript-ch",
+		SummaryMessageID:    "summary-1",
+		ThreadChannelID:     "thread-1",
+		UtteranceCount:      7,
+		Speakers: []VoiceTranscriptSpeaker{
+			{UserID: "111", DisplayName: "alice"},
+			{UserID: "222", DisplayName: "bob"},
+		},
+	}
+	_, err := fn(context.Background(), "alice: hi\nbob: hey", meta)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -207,7 +224,7 @@ func TestBuildVoiceTranscriptSummarizer_PersistsToMemoryAndDisk(t *testing.T) {
 		t.Errorf("PutDocument not called with expected path; got: %v", mem.putPaths)
 	}
 	// File should also exist on disk.
-	matches, _ := filepath.Glob(filepath.Join(tmp, "memory", "voice-sessions", "*", "*-session.md"))
+	matches, _ := filepath.Glob(filepath.Join(tmp, "memory", "voice-sessions", "2026-05-08", "1442-chill.md"))
 	if len(matches) == 0 {
 		t.Errorf("expected summary file on disk under %s", tmp)
 	} else {
@@ -217,6 +234,19 @@ func TestBuildVoiceTranscriptSummarizer_PersistsToMemoryAndDisk(t *testing.T) {
 		}
 		if !strings.Contains(string(body), "type: voice-session") {
 			t.Errorf("disk file missing frontmatter: %q", string(body))
+		}
+		for _, want := range []string{
+			`channel: "chill"`,
+			`duration_seconds: 720`,
+			`utterances: 7`,
+			`- "[[alice]]"`,
+			`- "[[Controller]]"`,
+			`https://discord.com/channels/guild-1/transcript-ch/summary-1`,
+			`## Summary`,
+		} {
+			if !strings.Contains(string(body), want) {
+				t.Errorf("disk file missing %q: %q", want, string(body))
+			}
 		}
 	}
 }
@@ -245,7 +275,7 @@ func TestBuildVoiceTranscriptSummarizer_EmptyTranscriptError(t *testing.T) {
 		Provider: p,
 		Model:    "stub-model",
 	})
-	_, err := fn(context.Background(), "   ")
+	_, err := fn(context.Background(), "   ", VoiceTranscriptSummaryMeta{})
 	if err == nil || !strings.Contains(err.Error(), "empty transcript") {
 		t.Errorf("expected empty transcript error, got %v", err)
 	}
@@ -257,7 +287,7 @@ func TestBuildVoiceTranscriptSummarizer_ProviderErrorPropagates(t *testing.T) {
 		Provider: p,
 		Model:    "stub-model",
 	})
-	_, err := fn(context.Background(), "alice: hi")
+	_, err := fn(context.Background(), "alice: hi", VoiceTranscriptSummaryMeta{})
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Errorf("expected wrapped err, got %v", err)
 	}
@@ -272,7 +302,7 @@ func TestBuildVoiceTranscriptSummarizer_ToolCallResponseFallsBackToStats(t *test
 		Provider: p,
 		Model:    "stub-model",
 	})
-	got, err := fn(context.Background(), "alice: hi")
+	got, err := fn(context.Background(), "alice: hi", VoiceTranscriptSummaryMeta{})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -291,7 +321,7 @@ func TestBuildVoiceTranscriptSummarizer_DSMLToolMarkupFallsBackToStats(t *testin
 		Provider: p,
 		Model:    "stub-model",
 	})
-	got, err := fn(context.Background(), "alice: hi")
+	got, err := fn(context.Background(), "alice: hi", VoiceTranscriptSummaryMeta{})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}

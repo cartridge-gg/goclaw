@@ -837,6 +837,27 @@ type VoiceTranscriptSummarizerConfig struct {
 	MemoryWorkspace  string
 }
 
+// VoiceTranscriptSummaryMeta carries session-specific facts that are useful
+// when persisting a voice summary as a durable memory note.
+type VoiceTranscriptSummaryMeta struct {
+	StartedAt           time.Time
+	EndedAt             time.Time
+	Duration            time.Duration
+	GuildID             string
+	VoiceChannelID      string
+	VoiceChannelName    string
+	TranscriptChannelID string
+	SummaryMessageID    string
+	ThreadChannelID     string
+	UtteranceCount      int
+	Speakers            []VoiceTranscriptSpeaker
+}
+
+type VoiceTranscriptSpeaker struct {
+	UserID      string
+	DisplayName string
+}
+
 // MemoryQueryer is a small read+write surface the voice summarizer
 // uses for memory access. Defined locally (rather than depending on
 // store.MemoryStore) to keep the channels package free of store

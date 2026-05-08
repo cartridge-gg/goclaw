@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,7 @@ type sessionOutput struct {
 	transcriptChannelID string
 	voiceChannelID      string
 	voiceChannelName    string // fallback "<id>" if Channel lookup failed
+	guildID             string
 	log                 *slog.Logger
 	summarizer          TranscriptSummarizer // optional; nil → keep legacy stats line on Close
 
@@ -98,11 +100,12 @@ const transcriptCaptureMax = 3000
 // summarizer is optional; if nil, Close keeps the legacy stats-line summary.
 //
 // Caller's ctx governs the two REST calls; budget ~5s total.
-func newSessionOutput(ctx context.Context, session discordSession, transcriptChID, voiceChID string, log *slog.Logger, summarizer TranscriptSummarizer) *sessionOutput {
+func newSessionOutput(ctx context.Context, session discordSession, transcriptChID, voiceChID, guildID string, log *slog.Logger, summarizer TranscriptSummarizer) *sessionOutput {
 	out := &sessionOutput{
 		session:             session,
 		transcriptChannelID: transcriptChID,
 		voiceChannelID:      voiceChID,
+		guildID:             guildID,
 		log:                 log,
 		summarizer:          summarizer,
 		speakers:            make(map[string]string),
@@ -375,6 +378,8 @@ func (o *sessionOutput) Close(ctx context.Context, duration time.Duration) {
 	speakerCount := len(o.speakers)
 	utterances := o.utteranceCount
 	transcriptCopy := append([]string(nil), o.transcriptLines...)
+	speakers := o.speakerSnapshotLocked()
+	endedAt := time.Now()
 	o.mu.Unlock()
 
 	if msgID == "" {
@@ -395,7 +400,20 @@ func (o *sessionOutput) Close(ctx context.Context, duration time.Duration) {
 	// otherwise keep the legacy stats line.
 	finalText := o.finalSummaryTextLocked(duration, speakerCount, utterances)
 	if o.summarizer != nil && len(transcriptCopy) > 0 {
-		summary, err := o.summarizer(ctx, strings.Join(transcriptCopy, "\n"))
+		meta := channels.VoiceTranscriptSummaryMeta{
+			StartedAt:           o.startedAt,
+			EndedAt:             endedAt,
+			Duration:            duration,
+			GuildID:             o.guildID,
+			VoiceChannelID:      o.voiceChannelID,
+			VoiceChannelName:    o.voiceChannelName,
+			TranscriptChannelID: o.transcriptChannelID,
+			SummaryMessageID:    msgID,
+			ThreadChannelID:     threadID,
+			UtteranceCount:      utterances,
+			Speakers:            speakers,
+		}
+		summary, err := o.summarizer(ctx, strings.Join(transcriptCopy, "\n"), meta)
 		switch {
 		case err != nil:
 			o.log.Warn("voice: transcript summarizer failed; falling back to stats line",
@@ -410,7 +428,8 @@ func (o *sessionOutput) Close(ctx context.Context, duration time.Duration) {
 			o.log.Info("voice: transcript summarizer returned empty; falling back to stats line",
 				"lines", len(transcriptCopy))
 		default:
-			finalText = combineSummaryAndStats(strings.TrimSpace(summary), finalText)
+			discordSummary := formatSummaryForDiscord(strings.TrimSpace(summary), speakers)
+			finalText = combineSummaryAndStats(discordSummary, finalText)
 		}
 	}
 
@@ -469,7 +488,7 @@ func (o *sessionOutput) runningSummaryTextLocked() string {
 	names := make([]string, 0, len(o.speakerOrder))
 	for _, uid := range o.speakerOrder {
 		if n, ok := o.speakers[uid]; ok && n != "" {
-			names = append(names, channels.SanitizeDisplayName(n))
+			names = append(names, discordSpeakerLabel(uid, n))
 		}
 	}
 	label := o.channelLabel()
@@ -503,6 +522,94 @@ func (o *sessionOutput) noteSpeakerLocked(userID, displayName string) {
 		o.speakerOrder = append(o.speakerOrder, userID)
 	}
 	o.speakers[userID] = displayName
+}
+
+func (o *sessionOutput) speakerSnapshotLocked() []channels.VoiceTranscriptSpeaker {
+	speakers := make([]channels.VoiceTranscriptSpeaker, 0, len(o.speakerOrder))
+	for _, uid := range o.speakerOrder {
+		name := strings.TrimSpace(o.speakers[uid])
+		if name == "" {
+			continue
+		}
+		speakers = append(speakers, channels.VoiceTranscriptSpeaker{
+			UserID:      uid,
+			DisplayName: name,
+		})
+	}
+	return speakers
+}
+
+func discordSpeakerLabel(userID, displayName string) string {
+	if isDiscordUserID(userID) {
+		return "<@" + userID + ">"
+	}
+	return channels.SanitizeDisplayName(displayName)
+}
+
+func isDiscordUserID(userID string) bool {
+	if len(userID) < 5 || strings.HasPrefix(userID, "recovered:") {
+		return false
+	}
+	for _, r := range userID {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func formatSummaryForDiscord(summary string, speakers []channels.VoiceTranscriptSpeaker) string {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return ""
+	}
+	summary = replaceWikilinksForDiscord(summary, speakers)
+	for _, speaker := range speakers {
+		label := discordSpeakerLabel(speaker.UserID, speaker.DisplayName)
+		if !strings.HasPrefix(label, "<@") {
+			continue
+		}
+		summary = replaceSpeakerName(summary, speaker.DisplayName, label)
+	}
+	return summary
+}
+
+func replaceWikilinksForDiscord(summary string, speakers []channels.VoiceTranscriptSpeaker) string {
+	re := regexp.MustCompile(`!?\[\[([^\[\]]+)\]\]`)
+	return re.ReplaceAllStringFunc(summary, func(match string) string {
+		inner := strings.TrimPrefix(match, "!")
+		inner = strings.TrimPrefix(inner, "[[")
+		inner = strings.TrimSuffix(inner, "]]")
+		target, display, ok := strings.Cut(inner, "|")
+		if !ok {
+			display = target
+		}
+		display = strings.TrimSpace(display)
+		target = strings.TrimSpace(target)
+		if display == "" {
+			display = target
+		}
+		for _, speaker := range speakers {
+			if sameSpeakerName(display, speaker.DisplayName) || sameSpeakerName(target, speaker.DisplayName) {
+				return discordSpeakerLabel(speaker.UserID, speaker.DisplayName)
+			}
+		}
+		return display
+	})
+}
+
+func replaceSpeakerName(summary, name, mention string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || mention == "" {
+		return summary
+	}
+	pattern := `(?i)(^|[^A-Za-z0-9_<@])(` + regexp.QuoteMeta(name) + `)([^A-Za-z0-9_>]|$)`
+	re := regexp.MustCompile(pattern)
+	return re.ReplaceAllString(summary, "${1}"+mention+"${3}")
+}
+
+func sameSpeakerName(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 func looksLikeTranscriptLine(line string) bool {

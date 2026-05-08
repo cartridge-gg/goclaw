@@ -24,6 +24,8 @@ import (
 	"context"
 	"os"
 	"time"
+
+	"github.com/nextlevelbuilder/goclaw/internal/channels"
 )
 
 // TranscriptSummarizer turns a session's full "<DisplayName>: <text>"
@@ -38,7 +40,7 @@ import (
 // ctx carries Close's REST timeout — typically 30s. Implementations
 // should respect it; long LLM calls block the supervisor's teardown
 // goroutine until they complete or the deadline fires.
-type TranscriptSummarizer func(ctx context.Context, transcript string) (string, error)
+type TranscriptSummarizer func(ctx context.Context, transcript string, meta channels.VoiceTranscriptSummaryMeta) (string, error)
 
 // DefaultTmpDir returns an OS-appropriate tmp directory for ogg utterance
 // files. Separate func (not a package var) so tests can override with
