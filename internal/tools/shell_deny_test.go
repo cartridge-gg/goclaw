@@ -143,6 +143,15 @@ func TestPrivilegeEscalationGaps(t *testing.T) {
 	)
 }
 
+func TestContainerEscapeBlocksSecretMounts(t *testing.T) {
+	patterns := DenyGroupRegistry["container_escape"].Patterns
+
+	mustDeny(t, patterns,
+		"cat /var/run/secrets/agent-runtime/GOCLAW_OPENAI_API_KEY",
+		"ls /var/run/secrets",
+	)
+}
+
 func TestExecute_RejectsNULByte(t *testing.T) {
 	tool := &ExecTool{} // minimal instance, no sandbox/workspace needed
 
