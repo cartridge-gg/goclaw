@@ -94,6 +94,10 @@ func (t *ReadDocumentTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Optional: specific media_id from <media:document> tag. If omitted, uses most recent document.",
 			},
+			"path": map[string]any{
+				"type":        "string",
+				"description": "Optional file path to a document in the workspace. Use this for downloaded PDFs or generated documents.",
+			},
 		},
 		"required": []string{"prompt"},
 	}
@@ -105,9 +109,10 @@ func (t *ReadDocumentTool) Execute(ctx context.Context, args map[string]any) *Re
 		prompt = "Analyze this document and describe its contents."
 	}
 	mediaID, _ := args["media_id"].(string)
+	docPathArg, _ := args["path"].(string)
 
-	// Resolve document file path from MediaRefs in context.
-	docPath, docMime, err := t.resolveDocumentFile(ctx, mediaID)
+	// Resolve document file path from explicit workspace path or MediaRefs.
+	docPath, docMime, err := t.resolveDocumentFile(ctx, mediaID, docPathArg)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}

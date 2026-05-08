@@ -5,17 +5,26 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
 
-// resolveDocumentFile finds the document file path from context MediaRefs.
-func (t *ReadDocumentTool) resolveDocumentFile(ctx context.Context, mediaID string) (path, mime string, err error) {
+// maxDocumentFileBytes is the max size for loading workspace documents (10MB).
+const maxDocumentFileBytes = 10 * 1024 * 1024
+
+// resolveDocumentFile finds the document file path from an explicit workspace
+// path or context MediaRefs.
+func (t *ReadDocumentTool) resolveDocumentFile(ctx context.Context, mediaID, docPath string) (path, mime string, err error) {
+	if docPath != "" {
+		return resolveDocumentPath(ctx, docPath)
+	}
+
 	refs := MediaDocRefsFromCtx(ctx)
 	if len(refs) == 0 {
-		return "", "", fmt.Errorf("no documents available in this conversation. The user may not have sent a document.")
+		return "", "", fmt.Errorf("no document path provided and no documents available in this conversation. Either provide the 'path' parameter or attach a document.")
 	}
 
 	// Find specific media_id or use most recent document.
@@ -55,6 +64,31 @@ func (t *ReadDocumentTool) resolveDocumentFile(ctx context.Context, mediaID stri
 	}
 
 	return p, mime, nil
+}
+
+func resolveDocumentPath(ctx context.Context, path string) (string, string, error) {
+	workspace := ToolWorkspaceFromCtx(ctx)
+	resolved, err := resolvePathWithAllowed(path, workspace, effectiveRestrict(ctx, true), allowedWithTeamWorkspace(ctx, nil))
+	if err != nil {
+		return "", "", fmt.Errorf("invalid document path: %w", err)
+	}
+	if err := checkDeniedPath(resolved, workspace, nil); err != nil {
+		return "", "", err
+	}
+
+	fi, err := os.Stat(resolved)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to stat document file: %w", err)
+	}
+	if fi.Size() > maxDocumentFileBytes {
+		return "", "", fmt.Errorf("document file too large (%d bytes, max %d)", fi.Size(), maxDocumentFileBytes)
+	}
+
+	mime := mimeFromDocExt(filepath.Ext(resolved))
+	if mime == "application/octet-stream" {
+		return "", "", fmt.Errorf("unsupported document format: %s (supported: pdf, doc, docx, xls, xlsx, ppt, pptx, csv)", filepath.Ext(path))
+	}
+	return resolved, mime, nil
 }
 
 // callProvider dispatches document analysis to the appropriate provider API.
