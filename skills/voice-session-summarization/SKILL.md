@@ -5,66 +5,44 @@ description: Summarize a Discord voice session transcript using semantic memory 
 
 # Voice Session Summarization
 
-You are summarizing a Discord voice channel conversation for a transcript channel. The user message contains the transcript with each line in the form `<speaker name>: <what they said>`. Your job is to produce a tight summary suitable for a Discord channel message: 2-4 short paragraphs OR a 3-6 bullet list, whichever fits the conversation better.
+You are summarizing a Discord voice channel conversation. The user message contains the transcript with each line in the form `<speaker name>: <what they said>`. Your job is to produce a tight summary: 2-4 short paragraphs OR a 3-6 bullet list, whichever fits the conversation better. The returned text is written to an Obsidian-compatible memory note, then rendered into Discord with wikilink brackets removed and exact speaker names converted to Discord mentions.
 
 ## Required steps
 
-You have access to memory tools (`memory_search`, `memory_get`, `memory_backlinks`) over the agent's memory vault. Use them to ground the summary in real context before writing a single sentence.
+Relevant memory snippets are injected into the system prompt before this task. You do not have live tools here; use only the transcript and injected memory context.
 
 ### 1. Speaker identity resolution
 
-For each unique speaker prefix (`<DisplayName>:`), call `memory_search` with the display name as the query. Contributor / person pages typically surface as the top result with `type: contributor` (or similar) in their frontmatter.
+For each unique speaker prefix (`<DisplayName>:`), inspect the injected memory context for contributor / person pages that resolve the display name.
 
-If a clearly canonical name appears in a high-ranking result's frontmatter `aliases` or title, normalize the speaker to that canonical form when you write the summary. For example: a Cartridge vault might map `mataleone` → contributor page `Mateusz Chudkowski`; you'd write `Mateusz` in the summary, not `mataleone`. The same mechanism resolves any team's people — there are no hardcoded names; only what the vault tells you.
+If a clearly canonical contributor page appears, use an Obsidian wikilink in the memory-oriented summary, but keep the display alias as the exact transcript speaker prefix so Discord mention conversion can still work. Example: `[[Mateusz Chudkowski|mataleone]]`.
 
 ### 2. Topic identification
 
-Identify product / project / component nouns in the transcript. For each candidate, `memory_search` semantically. If the top result is a definition page (frontmatter `type` in `project | product | component | concept | theme`), reference it via wikilink `[[Page Title]]` in the summary. This gives the transcript channel real cross-references back to the wiki, which Obsidian renders as backlinks for free.
+Identify product / project / component nouns in the transcript. If the injected memory context includes a definition page (frontmatter `type` in `project | product | component | concept | theme`), reference it via wikilink `[[Page Title]]` in the summary. This gives the persisted memory note real cross-references back to the wiki, which Obsidian renders as backlinks for free.
 
 ### 3. Temporal context
 
-`memory_search` for:
-- Recent prior voice-session entries — query for the channel name + recent date.
-- For any project resolved in step 2, query `<project> weekly|update|recent activity` to surface the latest project rollup.
-
-Consume the top ~5 snippets as background. When the current call references a thread that was discussed before, mention it briefly ("continuing last week's [[Glitch Bomb]] discussion …").
+Use injected snippets for recent prior voice-session entries, project rollups, and contributor pages. When the current call references a thread that was discussed before, mention it briefly ("continuing last week's [[Glitch Bomb]] discussion ...").
 
 ### 4. Compose
 
 - 2-4 short paragraphs OR 3-6 bullets, whichever the conversation shape calls for.
-- ≤1500 characters total (Discord-compatible).
+- <=1500 characters total.
 - Lead with the topic / decision, not generic preamble.
 - Use canonical names + wikilinks per steps 1-2.
 - Quote at most one short, distinctive line if it's load-bearing.
 - Skip filler ("uh", "you know"), greetings, side-channel chatter.
 - If the conversation was very short or content-free, just say so in one sentence.
-- Plain text — no Markdown headings; small inline emphasis (italics, bold) is fine.
+- No Markdown headings; small inline emphasis (italics, bold) and Obsidian wikilinks are fine.
 
 ### 5. Persist (optional — only when configured)
 
-If a session output directory was provided (typically as `VOICE_SESSION_OUTPUT_DIR` env var or the `session_output_dir` field on your invocation), write a new memory entry there using `write_file`:
-
-Path: `<session_output_dir>/<YYYY-MM-DD>/<HHMM>-<channel-slug>.md`
-
-Frontmatter:
-```yaml
----
-title: <channel> voice session — <human time>
-type: voice-session
-updated: <ISO date>
-participants: [<canonical names from step 1>]
-tags: [voice, <project-slugs from step 2>]
-sources: [<discord message URL if available>]
----
-```
-
-Body: the summary text from step 4.
-
-The disk seeder (`internal/memory/disk_seeder.go`) picks up this new file within its next sweep (default: 5 min) and indexes it. Wikilinks back to projects + contributors automatically yield Obsidian backlinks.
+GoClaw persists the returned summary automatically when `session_output_dir` is configured. Do not write files yourself. The persisted file includes frontmatter for channel, timestamps, Discord source URL, participants, duration, utterance count, and tags.
 
 ### 6. Return
 
-Return only the summary body text (the step-4 output, not the frontmatter). This becomes the response posted to Discord.
+Return only the summary body text. Do not include frontmatter. The raw text becomes the memory note body; Discord receives a cleaned rendering with `[[...]]` brackets removed and exact speaker references converted to mentions.
 
 ## Project-agnostic design
 

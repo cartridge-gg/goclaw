@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/cartridge-gg/discordgo"
+
+	"github.com/nextlevelbuilder/goclaw/internal/channels"
 )
 
 // On a successful wire-up, the session output posts an initial summary
@@ -15,7 +17,7 @@ import (
 // should go to the thread, not the parent channel.
 func Test_newSessionOutput_happy_path_posts_summary_and_creates_thread(t *testing.T) {
 	fs := &fakeSession{}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	if fs.channelCalls != 1 {
 		t.Errorf("expected one Channel() lookup for channel name; got %d", fs.channelCalls)
 	}
@@ -48,7 +50,7 @@ func Test_newSessionOutput_channel_lookup_failure_falls_back_to_id(t *testing.T)
 	fs := &fakeSession{
 		channelFn: func(_ string) (*discordgo.Channel, error) { return nil, errors.New("no perms") },
 	}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch-xyz", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch-xyz", "guild-1", discardLogger(), nil)
 	if !strings.Contains(fs.lastSentContent, "voice-ch-xyz") {
 		t.Errorf("fallback should use raw voice channel ID in summary: %q", fs.lastSentContent)
 	}
@@ -70,7 +72,7 @@ func Test_newSessionOutput_summary_post_failure_keeps_output_usable(t *testing.T
 			return &discordgo.Message{ID: "msg-x"}, nil
 		},
 	}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	if out.summaryMsgID != "" {
 		t.Error("summaryMsgID should be empty after failed post")
 	}
@@ -92,7 +94,7 @@ func Test_newSessionOutput_thread_failure_falls_back_to_parent(t *testing.T) {
 			return nil, errors.New("rate limit")
 		},
 	}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	if out.summaryMsgID == "" {
 		t.Error("summary should have been posted before thread create failed")
 	}
@@ -130,7 +132,7 @@ func Test_newSessionOutput_recovers_active_summary_and_thread(t *testing.T) {
 			}
 		},
 	}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	if fs.channelSendCalls != 0 {
 		t.Fatalf("recovery should not create a new summary message, sent %d", fs.channelSendCalls)
 	}
@@ -176,7 +178,7 @@ func Test_newSessionOutput_ignores_stale_active_summary_when_recovering(t *testi
 			}
 		},
 	}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	if out.summaryMsgID == "summary-old" || out.threadChannelID == "thread-old" {
 		t.Fatalf("must not recover stale summary/thread: summary=%q thread=%q", out.summaryMsgID, out.threadChannelID)
 	}
@@ -201,7 +203,7 @@ func Test_newSessionOutput_ignores_ended_summary_when_recovering(t *testing.T) {
 			}}, nil
 		},
 	}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	if out.summaryMsgID == "summary-ended" {
 		t.Fatal("must not recover an already-ended voice summary")
 	}
@@ -214,7 +216,7 @@ func Test_newSessionOutput_ignores_ended_summary_when_recovering(t *testing.T) {
 // speaker don't re-edit (no change to the list).
 func Test_NoteSpeaker_updates_summary_and_dedupes(t *testing.T) {
 	fs := &fakeSession{}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	// Force the edit-throttle timer to the distant past so our edits fire.
 	out.lastEditAt = time.Time{}
 
@@ -237,7 +239,7 @@ func Test_NoteSpeaker_updates_summary_and_dedupes(t *testing.T) {
 // always flushes the final state regardless of recency.
 func Test_NoteSpeaker_throttled_but_Close_always_edits(t *testing.T) {
 	fs := &fakeSession{}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	// First speaker: open the throttle window.
 	out.NoteSpeaker(context.Background(), "u1", "Alice")
 	// Second speaker immediately — within the throttle window.
@@ -272,7 +274,7 @@ func Test_Close_idempotent_and_nil_safe(t *testing.T) {
 	nilOut.Close(context.Background(), 0) // nil receiver is allowed
 
 	fs := &fakeSession{}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	beforeDel := fs.channelMessageDeleteCalls
 	beforeChDel := fs.channelDeleteCalls
 	out.Close(context.Background(), time.Second)
@@ -298,7 +300,7 @@ func Test_Close_idempotent_and_nil_safe(t *testing.T) {
 // channel quiet for sessions where no human spoke.
 func Test_Close_empty_session_deletes_summary_and_thread(t *testing.T) {
 	fs := &fakeSession{}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	editsBefore := fs.channelEditCalls
 	out.Close(context.Background(), time.Minute)
 	if fs.channelMessageDeleteCalls != 1 {
@@ -323,12 +325,12 @@ func Test_Close_runs_summarizer_when_set(t *testing.T) {
 	fs := &fakeSession{}
 	called := false
 	var seenTranscript string
-	summarizer := func(_ context.Context, transcript string) (string, error) {
+	summarizer := func(_ context.Context, transcript string, _ channels.VoiceTranscriptSummaryMeta) (string, error) {
 		called = true
 		seenTranscript = transcript
 		return "Discussed the new feature rollout.", nil
 	}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), summarizer)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), summarizer)
 	out.PostLine(context.Background(), "Alice", "we're rolling out the new feature next week")
 	out.PostLine(context.Background(), "Bob", "anything I should help with?")
 	out.Close(context.Background(), 5*time.Minute)
@@ -349,13 +351,39 @@ func Test_Close_runs_summarizer_when_set(t *testing.T) {
 	}
 }
 
+func Test_Close_formats_summary_for_discord(t *testing.T) {
+	fs := &fakeSession{}
+	var seenMeta channels.VoiceTranscriptSummaryMeta
+	summarizer := func(_ context.Context, _ string, meta channels.VoiceTranscriptSummaryMeta) (string, error) {
+		seenMeta = meta
+		return "alice and [[bob]] discussed [[Controller|Controller]].", nil
+	}
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), summarizer)
+	out.NoteSpeaker(context.Background(), "111111", "alice")
+	out.NoteSpeaker(context.Background(), "222222", "bob")
+	out.PostLine(context.Background(), "alice", "we should fix this")
+	out.Close(context.Background(), 2*time.Minute)
+
+	if strings.Contains(fs.lastEditContent, "[[") || strings.Contains(fs.lastEditContent, "]]") {
+		t.Fatalf("Discord summary should not contain wikilink brackets: %q", fs.lastEditContent)
+	}
+	for _, want := range []string{"<@111111>", "<@222222>", "Controller"} {
+		if !strings.Contains(fs.lastEditContent, want) {
+			t.Fatalf("Discord summary missing %q: %q", want, fs.lastEditContent)
+		}
+	}
+	if seenMeta.GuildID != "guild-1" || seenMeta.SummaryMessageID == "" || len(seenMeta.Speakers) != 2 {
+		t.Fatalf("summarizer metadata not populated: %+v", seenMeta)
+	}
+}
+
 // Summarizer returning an error → fall back to the legacy stats line.
 func Test_Close_summarizer_error_falls_back_to_stats(t *testing.T) {
 	fs := &fakeSession{}
-	summarizer := func(_ context.Context, _ string) (string, error) {
+	summarizer := func(_ context.Context, _ string, _ channels.VoiceTranscriptSummaryMeta) (string, error) {
 		return "", errors.New("provider down")
 	}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), summarizer)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), summarizer)
 	out.PostLine(context.Background(), "Alice", "hi")
 	out.Close(context.Background(), time.Minute)
 	if strings.Contains(fs.lastEditContent, "provider") {
@@ -368,10 +396,10 @@ func Test_Close_summarizer_error_falls_back_to_stats(t *testing.T) {
 
 func Test_Close_truncates_overlong_summarizer_output(t *testing.T) {
 	fs := &fakeSession{}
-	summarizer := func(_ context.Context, _ string) (string, error) {
+	summarizer := func(_ context.Context, _ string, _ channels.VoiceTranscriptSummaryMeta) (string, error) {
 		return strings.Repeat("x", summaryMessageMaxLen+500), nil
 	}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), summarizer)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), summarizer)
 	out.PostLine(context.Background(), "Alice", "hi")
 	out.Close(context.Background(), time.Minute)
 	if len(fs.lastEditContent) > summaryMessageMaxLen {
@@ -389,7 +417,7 @@ func Test_Close_noop_when_summary_post_failed(t *testing.T) {
 			return nil, errors.New("forbidden")
 		},
 	}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	before := fs.channelEditCalls
 	out.Close(context.Background(), time.Minute)
 	if fs.channelEditCalls != before {
@@ -401,7 +429,7 @@ func Test_Close_noop_when_summary_post_failed(t *testing.T) {
 // summary's stats line.
 func Test_Close_reports_utterance_count(t *testing.T) {
 	fs := &fakeSession{}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	for i := 0; i < 3; i++ {
 		out.PostLine(context.Background(), "alice", "hi")
 	}
@@ -418,7 +446,7 @@ func Test_Close_reports_utterance_count(t *testing.T) {
 // so late-session transcripts still reach operators.
 func Test_PostLine_falls_back_to_parent_on_thread_cap(t *testing.T) {
 	fs := &fakeSession{}
-	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", discardLogger(), nil)
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	out.mu.Lock()
 	out.utteranceCount = threadMessageCap // simulate cap already hit
 	out.mu.Unlock()
