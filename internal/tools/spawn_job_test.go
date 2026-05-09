@@ -153,6 +153,40 @@ func TestSpawnJob_MemoryUpdatesAllowsMissingSink(t *testing.T) {
 	}
 }
 
+func TestSpawnJob_MemoryUpdatesDropsCronSink(t *testing.T) {
+	taskStore := &fakeSubagentTaskStore{}
+	var received SpawnJobRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(SpawnJobResponse{
+			JobID:      uuid.New().String(),
+			K8sJobName: "job-memory-updates-deadbeef",
+			K8sJobUID:  "uid-1",
+		})
+	}))
+	defer srv.Close()
+
+	tool := NewSpawnJobTool(taskStore, srv.URL, []byte("secret"))
+	args := validArgs()
+	args["kind"] = "memory-updates"
+	args["command"] = "/app/agent/bin/run-memory-updates"
+	args["args"] = []any{"--cadence", "daily", "--date", "2026-05-08"}
+	args["sinks"] = []any{map[string]any{"type": "cron"}}
+
+	res := tool.Execute(withTenantAndChannel(t), args)
+	if res == nil || res.IsError {
+		t.Fatalf("expected success, got %+v", res)
+	}
+	if len(taskStore.created) != 0 {
+		t.Fatalf("sinkless memory update should not create a Discord task row, got %d", len(taskStore.created))
+	}
+	if len(received.Sinks) != 0 {
+		t.Fatalf("expected cron sink to be dropped, got %+v", received.Sinks)
+	}
+}
+
 func TestSpawnJob_RequiredFields(t *testing.T) {
 	cases := []string{"kind", "command", "worktree_path"}
 	for _, missing := range cases {
