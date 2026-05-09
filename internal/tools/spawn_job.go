@@ -307,6 +307,9 @@ func parseSpawnJobArgs(args map[string]any) (SpawnJobRequest, error) {
 	req.Env = argStringMap(args, "env")
 	req.Resources = parseResources(args["resources"])
 	req.Sinks = parseSinks(args["sinks"])
+	if req.Kind == "memory-updates" {
+		req.Sinks = nil
+	}
 	if len(req.Sinks) == 0 && req.Kind != "memory-updates" {
 		return req, fmt.Errorf("at least one sink is required")
 	}
