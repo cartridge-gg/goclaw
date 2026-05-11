@@ -106,6 +106,25 @@ func TestSendKeepsTypingActiveWhenDeliveryFails(t *testing.T) {
 	}
 }
 
+func TestAutoClearApplicationInteractionsEndpointEnv(t *testing.T) {
+	ch := &Channel{}
+	if !ch.autoClearApplicationInteractionsEndpoint() {
+		t.Fatal("auto-clear should default to enabled")
+	}
+
+	for _, v := range []string{"0", "false", "no", " FALSE "} {
+		t.Setenv("GOCLAW_DISCORD_AUTOCLEAR_INTERACTIONS_ENDPOINT", v)
+		if ch.autoClearApplicationInteractionsEndpoint() {
+			t.Fatalf("auto-clear should be disabled for %q", v)
+		}
+	}
+
+	t.Setenv("GOCLAW_DISCORD_AUTOCLEAR_INTERACTIONS_ENDPOINT", "true")
+	if !ch.autoClearApplicationInteractionsEndpoint() {
+		t.Fatal("auto-clear should be enabled for explicit true")
+	}
+}
+
 func newTestChannel(t *testing.T, server *httptest.Server) *Channel {
 	t.Helper()
 

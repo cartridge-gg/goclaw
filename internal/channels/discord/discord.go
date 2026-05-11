@@ -214,6 +214,26 @@ func (c *Channel) logApplicationInteractionDiagnostics() {
 		if parsed, parseErr := url.Parse(endpoint); parseErr == nil {
 			endpointHost = parsed.Host
 		}
+		slog.Warn("discord: application interactions endpoint is configured; gateway interaction events may not be delivered",
+			"channel", c.Name(),
+			"app_id", c.applicationID,
+			"interactions_endpoint_host", endpointHost)
+		if c.autoClearApplicationInteractionsEndpoint() {
+			if err := c.clearApplicationInteractionsEndpoint(); err != nil {
+				slog.Warn("discord: failed to clear application interactions endpoint",
+					"channel", c.Name(),
+					"app_id", c.applicationID,
+					"interactions_endpoint_host", endpointHost,
+					"error", err)
+			} else {
+				slog.Info("discord: cleared application interactions endpoint for gateway delivery",
+					"channel", c.Name(),
+					"app_id", c.applicationID,
+					"previous_interactions_endpoint_host", endpointHost)
+				endpoint = ""
+				endpointHost = ""
+			}
+		}
 	}
 	slog.Info("discord: application interaction routing",
 		"channel", c.Name(),
@@ -222,6 +242,21 @@ func (c *Channel) logApplicationInteractionDiagnostics() {
 		"flags", app.Flags,
 		"interactions_endpoint_configured", endpoint != "",
 		"interactions_endpoint_host", endpointHost)
+}
+
+func (c *Channel) autoClearApplicationInteractionsEndpoint() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("GOCLAW_DISCORD_AUTOCLEAR_INTERACTIONS_ENDPOINT")))
+	return v != "0" && v != "false" && v != "no"
+}
+
+func (c *Channel) clearApplicationInteractionsEndpoint() error {
+	_, err := c.session.RequestWithBucketID(
+		"PATCH",
+		discordgo.EndpointOAuth2Application("@me"),
+		map[string]any{"interactions_endpoint_url": nil},
+		discordgo.EndpointOAuth2Application(""),
+	)
+	return err
 }
 
 // startVoiceSupervisor is a no-op when voice_channel_enabled is unset or
