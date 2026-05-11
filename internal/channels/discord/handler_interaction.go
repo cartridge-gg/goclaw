@@ -518,57 +518,13 @@ func (c *Channel) handleComponentInteraction(i *discordgo.InteractionCreate) {
 		return
 	}
 
-	// Button clicks are always non-ephemeral — the click itself is visible to
-	// the channel (Discord's own UI shows "user clicked X"), so there's no
-	// secrecy gain from an ephemeral ACK and plenty of audit value from a
-	// public one.
-	if err := c.session.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-	}); err != nil {
+	if err := c.session.InteractionRespond(i.Interaction, componentInteractionACK()); err != nil {
 		slog.Warn("discord: deferred ACK failed for component interaction", "custom_id", data.CustomID, "error", err)
 		// Keep going — the agent reply will fall back to a regular channel
 		// post when Send() can't find a usable interaction token.
 	}
 
-	echo := &interactionEcho{
-		AppID:     c.applicationID,
-		Token:     i.Token,
-		Ephemeral: false,
-		GuildID:   i.GuildID,
-		CreatedAt: time.Now(),
-	}
-	c.interactionTokens.Store(i.ID, echo)
-
-	metadata := map[string]string{
-		"message_id":   i.ID,
-		"user_id":      invoker,
-		"username":     invokerTag,
-		"display_name": channels.SanitizeDisplayName(invokerTag),
-		"guild_id":     i.GuildID,
-		"channel_id":   channelID,
-		"is_dm":        fmt.Sprintf("%t", isDM),
-		// Interaction reply path (same keys as slash-command dispatch).
-		"discord_interaction_token": i.Token,
-		"discord_interaction_id":    i.ID,
-		"discord_interaction_appid": c.applicationID,
-		// Component-specific routing keys. Skills can branch on
-		// interaction_kind=component, read button_custom_id as the action,
-		// and recover prior state from component_parent_content (the original
-		// message body, including any HTML-comment markers the sender
-		// embedded for state handoff).
-		"interaction_kind": "component",
-		"component_type":   "button",
-		"button_custom_id": data.CustomID,
-	}
-	// Parent-message fields only populate if Discord actually delivered the
-	// resolved message. discordgo.InteractionCreate.Message is nominally
-	// non-nil for button clicks, but guard defensively — a nil dereference
-	// here would panic mid-handler and the interaction would stay un-ACKed.
-	if i.Message != nil {
-		metadata["component_parent_message"] = i.Message.ID
-		metadata["component_parent_channel"] = i.Message.ChannelID
-		metadata["component_parent_content"] = i.Message.Content
-	}
+	metadata := buildComponentInteractionMetadata(i.ID, invoker, invokerTag, i.GuildID, channelID, isDM, data.CustomID, i.Message)
 
 	if cc := c.ContactCollector(); cc != nil {
 		cc.EnsureContact(ctx, c.Type(), c.Name(), invoker, invoker, invokerTag, invokerTag, peerKind, "user", "", "")
@@ -587,3 +543,34 @@ func (c *Channel) handleComponentInteraction(i *discordgo.InteractionCreate) {
 	})
 }
 
+func componentInteractionACK() *discordgo.InteractionResponse {
+	return &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredMessageUpdate,
+	}
+}
+
+func buildComponentInteractionMetadata(interactionID, invoker, invokerTag, guildID, channelID string, isDM bool, customID string, parent *discordgo.Message) map[string]string {
+	metadata := map[string]string{
+		"message_id":   interactionID,
+		"user_id":      invoker,
+		"username":     invokerTag,
+		"display_name": channels.SanitizeDisplayName(invokerTag),
+		"guild_id":     guildID,
+		"channel_id":   channelID,
+		"is_dm":        fmt.Sprintf("%t", isDM),
+		// Component-specific routing keys. Skills can branch on
+		// interaction_kind=component and read button_custom_id as the action.
+		"interaction_kind": "component",
+		"component_type":   "button",
+		"button_custom_id": customID,
+	}
+	// Parent-message fields only populate if Discord actually delivered the
+	// resolved message. discordgo.InteractionCreate.Message is nominally
+	// non-nil for button clicks, but guard defensively.
+	if parent != nil {
+		metadata["component_parent_message"] = parent.ID
+		metadata["component_parent_channel"] = parent.ChannelID
+		metadata["component_parent_content"] = parent.Content
+	}
+	return metadata
+}
