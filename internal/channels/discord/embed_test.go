@@ -370,6 +370,27 @@ func TestSendEmbed_ComponentsValidation(t *testing.T) {
 	}
 }
 
+func TestSummarizeComponents(t *testing.T) {
+	rows, buttons, customIDs := summarizeComponents([]channels.DiscordMessageComponent{
+		{ActionRow: []channels.DiscordButton{
+			{Label: "Approve", Style: channels.DiscordButtonSuccess, CustomID: "billing:approve:abc123"},
+			{Label: "Open", Style: channels.DiscordButtonLink, URL: "https://example.com"},
+		}},
+		{ActionRow: []channels.DiscordButton{
+			{Label: "Reject", Style: channels.DiscordButtonDanger, CustomID: "billing:reject:abc123"},
+		}},
+	})
+	if rows != 2 {
+		t.Fatalf("rows = %d, want 2", rows)
+	}
+	if buttons != 3 {
+		t.Fatalf("buttons = %d, want 3", buttons)
+	}
+	if strings.Join(customIDs, ",") != "billing:approve:abc123,billing:reject:abc123" {
+		t.Fatalf("customIDs = %#v", customIDs)
+	}
+}
+
 func makeRows(n int, prototype channels.DiscordButton) []channels.DiscordMessageComponent {
 	out := make([]channels.DiscordMessageComponent, n)
 	for i := range out {
