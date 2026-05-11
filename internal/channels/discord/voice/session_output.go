@@ -581,6 +581,14 @@ func formatSummaryForDiscord(summary string, speakers []channels.VoiceTranscript
 	return summary
 }
 
+// FormatSummaryForDiscord converts an Obsidian/memory-friendly voice summary
+// into Discord message text. Backfill/regeneration code outside this package
+// uses the same formatter as live session close so Discord never sees raw
+// wikilink brackets and known speaker names become user mentions.
+func FormatSummaryForDiscord(summary string, speakers []channels.VoiceTranscriptSpeaker) string {
+	return formatSummaryForDiscord(summary, speakers)
+}
+
 func replaceWikilinksForDiscord(summary string, speakers []channels.VoiceTranscriptSpeaker) string {
 	re := regexp.MustCompile(`!?\[\[([^\[\]]+)\]\]`)
 	return re.ReplaceAllStringFunc(summary, func(match string) string {
@@ -674,6 +682,12 @@ func combineSummaryAndStats(summary, stats string) string {
 		return truncateContent(stats, summaryMessageMaxLen)
 	}
 	return truncateContent(summary, available) + sep + stats
+}
+
+// CombineSummaryAndStats applies the same Discord message length guard used by
+// live voice session close.
+func CombineSummaryAndStats(summary, stats string) string {
+	return combineSummaryAndStats(summary, stats)
 }
 
 func truncateContent(s string, maxLen int) string {

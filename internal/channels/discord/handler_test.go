@@ -5,7 +5,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/cartridge-gg/discordgo"
 
@@ -123,6 +125,50 @@ func TestTryHandleCommandKnownCommands(t *testing.T) {
 				t.Errorf("tryHandleCommand(%q) = true, want false", content)
 			}
 		})
+	}
+}
+
+func TestIsVoiceSummaryRegenerationRequest(t *testing.T) {
+	tests := []struct {
+		content string
+		want    bool
+	}{
+		{"regenerate summary", true},
+		{"can you rerun the transcript summary?", true},
+		{"backfill voice summary please", true},
+		{"refresh summarization", true},
+		{"summarize this unrelated thread", false},
+		{"regenerate the test data", false},
+		{"hello", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.content, func(t *testing.T) {
+			if got := isVoiceSummaryRegenerationRequest(tt.content); got != tt.want {
+				t.Fatalf("isVoiceSummaryRegenerationRequest(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestVoiceTranscriptFromMessages(t *testing.T) {
+	base := time.Date(2026, 5, 11, 15, 0, 0, 0, time.UTC)
+	transcript, times, speakers := voiceTranscriptFromMessages([]*discordgo.Message{
+		{Content: "regenerate summary", Timestamp: base.Add(3 * time.Second)},
+		{Content: "Alice: shipped the fix", Timestamp: base},
+		{Content: "Bob: looks good", Timestamp: base.Add(time.Second)},
+		{Content: "Alice: thanks", Timestamp: base.Add(2 * time.Second)},
+	})
+	if !strings.Contains(transcript, "Alice: shipped the fix") || !strings.Contains(transcript, "Bob: looks good") {
+		t.Fatalf("transcript missing expected lines: %q", transcript)
+	}
+	if strings.Contains(transcript, "regenerate summary") {
+		t.Fatalf("operator command should not be treated as transcript: %q", transcript)
+	}
+	if len(times) != 3 {
+		t.Fatalf("times len = %d, want 3", len(times))
+	}
+	if got, want := strings.Join(speakers, ","), "Alice,Bob"; got != want {
+		t.Fatalf("speakers = %q, want %q", got, want)
 	}
 }
 
