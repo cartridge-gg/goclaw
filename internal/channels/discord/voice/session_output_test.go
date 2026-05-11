@@ -394,6 +394,36 @@ func Test_Close_summarizer_error_falls_back_to_stats(t *testing.T) {
 	}
 }
 
+func Test_Close_summarizer_timeout_still_posts_final_stats(t *testing.T) {
+	oldSummaryTimeout := transcriptSummaryTimeout
+	oldEditTimeout := finalSummaryEditTimeout
+	transcriptSummaryTimeout = 10 * time.Millisecond
+	finalSummaryEditTimeout = 50 * time.Millisecond
+	defer func() {
+		transcriptSummaryTimeout = oldSummaryTimeout
+		finalSummaryEditTimeout = oldEditTimeout
+	}()
+
+	fs := &fakeSession{}
+	summarizer := func(ctx context.Context, _ string, _ channels.VoiceTranscriptSummaryMeta) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), summarizer)
+	out.PostLine(context.Background(), "Alice", "hi")
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	out.Close(closeCtx, time.Minute)
+
+	if fs.channelEditCalls == 0 {
+		t.Fatal("final stats edit should still be attempted after summarizer timeout")
+	}
+	if !strings.Contains(fs.lastEditContent, "✅ Voice session ended") {
+		t.Fatalf("fallback stats should be posted after summarizer timeout: %q", fs.lastEditContent)
+	}
+}
+
 func Test_Close_truncates_overlong_summarizer_output(t *testing.T) {
 	fs := &fakeSession{}
 	summarizer := func(_ context.Context, _ string, _ channels.VoiceTranscriptSummaryMeta) (string, error) {
@@ -439,6 +469,32 @@ func Test_Close_reports_utterance_count(t *testing.T) {
 	}
 	if !strings.Contains(fs.lastEditContent, "1m") {
 		t.Errorf("final summary should include duration: %q", fs.lastEditContent)
+	}
+}
+
+func Test_PostLine_retains_transcript_when_discord_post_fails(t *testing.T) {
+	fs := &fakeSession{
+		channelSendFn: func(channelID, _ string) (*discordgo.Message, error) {
+			if channelID == "thread-1" {
+				return nil, errors.New("discord timeout")
+			}
+			return &discordgo.Message{ID: "summary-1"}, nil
+		},
+	}
+	var seenTranscript string
+	summarizer := func(_ context.Context, transcript string, _ channels.VoiceTranscriptSummaryMeta) (string, error) {
+		seenTranscript = transcript
+		return "summary", nil
+	}
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), summarizer)
+	out.PostLine(context.Background(), "Alice", "this should survive")
+	out.Close(context.Background(), time.Minute)
+
+	if !strings.Contains(seenTranscript, "Alice: this should survive") {
+		t.Fatalf("failed Discord posts should still feed the final summary, got %q", seenTranscript)
+	}
+	if !strings.Contains(fs.lastEditContent, "1 utterance") {
+		t.Fatalf("final stats should count accepted transcript lines: %q", fs.lastEditContent)
 	}
 }
 

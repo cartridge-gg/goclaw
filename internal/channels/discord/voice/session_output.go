@@ -43,6 +43,11 @@ const (
 	summaryEditMinInterval = 4 * time.Second
 )
 
+var (
+	transcriptSummaryTimeout = 30 * time.Second
+	finalSummaryEditTimeout  = 10 * time.Second
+)
+
 // sessionOutput owns the per-voice-session Discord artefacts: one summary
 // message in the transcript text channel and an attached thread where raw
 // per-utterance transcripts go. One instance per voice-join; discarded on
@@ -72,7 +77,7 @@ type sessionOutput struct {
 	speakers        map[string]string // userID -> display name (ordered via sort for summary rendering)
 	speakerOrder    []string          // first-seen order, rendered in summary
 	startedAt       time.Time         // session start (for final-summary duration)
-	utteranceCount  int               // total PostLine calls that succeeded
+	utteranceCount  int               // total transcribed lines accepted for this session
 	droppedOnCap    int               // posts that spilled to the parent channel after hitting threadMessageCap
 	lastEditAt      time.Time         // last summary-edit request start; used for rate-throttle
 	closed          bool
@@ -245,9 +250,9 @@ func (o *sessionOutput) loadRecoveredTranscript(ctx context.Context, threadChann
 	return recovered
 }
 
-// PostLine posts a transcript line to the thread (or the parent transcript
-// channel if the thread is unavailable). Counts toward the per-thread cap
-// and increments utteranceCount. Always honours the caller's ctx for the
+// PostLine records a transcript line for the final summary and posts it to the
+// thread (or the parent transcript channel if the thread is unavailable).
+// Counts toward the per-thread cap and always honours the caller's ctx for the
 // REST timeout.
 func (o *sessionOutput) PostLine(ctx context.Context, displayName, text string) {
 	if o == nil {
@@ -271,6 +276,10 @@ func (o *sessionOutput) PostLine(ctx context.Context, displayName, text string) 
 		}
 		target = o.transcriptChannelID
 	}
+	o.utteranceCount++
+	if len(o.transcriptLines) < transcriptCaptureMax {
+		o.transcriptLines = append(o.transcriptLines, line)
+	}
 	o.mu.Unlock()
 
 	if target == "" {
@@ -284,12 +293,6 @@ func (o *sessionOutput) PostLine(ctx context.Context, displayName, text string) 
 			"err", err, "target_channel_id", target)
 		return
 	}
-	o.mu.Lock()
-	o.utteranceCount++
-	if len(o.transcriptLines) < transcriptCaptureMax {
-		o.transcriptLines = append(o.transcriptLines, line)
-	}
-	o.mu.Unlock()
 }
 
 // NoteSpeaker records a speaker for the session and refreshes the summary
@@ -413,7 +416,9 @@ func (o *sessionOutput) Close(ctx context.Context, duration time.Duration) {
 			UtteranceCount:      utterances,
 			Speakers:            speakers,
 		}
-		summary, err := o.summarizer(ctx, strings.Join(transcriptCopy, "\n"), meta)
+		summaryCtx, cancel := context.WithTimeout(ctx, transcriptSummaryTimeout)
+		summary, err := o.summarizer(summaryCtx, strings.Join(transcriptCopy, "\n"), meta)
+		cancel()
 		switch {
 		case err != nil:
 			o.log.Warn("voice: transcript summarizer failed; falling back to stats line",
@@ -433,7 +438,9 @@ func (o *sessionOutput) Close(ctx context.Context, duration time.Duration) {
 		}
 	}
 
-	if _, err := o.session.ChannelMessageEdit(o.transcriptChannelID, msgID, finalText, discordgo.WithContext(ctx)); err != nil {
+	editCtx, cancel := context.WithTimeout(ctx, finalSummaryEditTimeout)
+	defer cancel()
+	if _, err := o.session.ChannelMessageEdit(o.transcriptChannelID, msgID, finalText, discordgo.WithContext(editCtx)); err != nil {
 		o.log.Warn("voice: final summary edit failed", "err", err)
 	}
 }

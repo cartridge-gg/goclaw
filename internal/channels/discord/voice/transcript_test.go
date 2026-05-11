@@ -3,6 +3,7 @@ package voice
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,7 +79,12 @@ func (f *fakeSession) ChannelMessageSend(channelID, content string, _ ...discord
 	return fn(channelID, content)
 }
 
-func (f *fakeSession) ChannelMessageEdit(channelID, messageID, content string, _ ...discordgo.RequestOption) (*discordgo.Message, error) {
+func (f *fakeSession) ChannelMessageEdit(channelID, messageID, content string, opts ...discordgo.RequestOption) (*discordgo.Message, error) {
+	if ctx := requestOptionContext(opts...); ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	f.mu.Lock()
 	f.channelEditCalls++
 	f.lastEditChannelID = channelID
@@ -90,6 +96,20 @@ func (f *fakeSession) ChannelMessageEdit(channelID, messageID, content string, _
 		return &discordgo.Message{ID: messageID}, nil
 	}
 	return fn(channelID, messageID, content)
+}
+
+func requestOptionContext(opts ...discordgo.RequestOption) context.Context {
+	req, err := http.NewRequest(http.MethodGet, "https://discord.test", nil)
+	if err != nil {
+		return context.Background()
+	}
+	cfg := &discordgo.RequestConfig{Request: req}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(cfg)
+		}
+	}
+	return cfg.Request.Context()
 }
 
 func (f *fakeSession) Channel(channelID string, _ ...discordgo.RequestOption) (*discordgo.Channel, error) {
