@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/cartridge-gg/discordgo"
@@ -97,6 +98,17 @@ func sendEmbed(ctx context.Context, api embedAPI, params channels.DiscordSendEmb
 		send.Components = components
 	}
 
+	if len(params.Components) > 0 {
+		rows, buttons, customIDs := summarizeComponents(params.Components)
+		slog.Info("discord: sending embed with components",
+			"channel_id", params.ChannelID,
+			"reply_to", params.ReplyTo,
+			"embed_count", len(params.Embeds),
+			"component_rows", rows,
+			"component_buttons", buttons,
+			"component_custom_ids", customIDs)
+	}
+
 	msg, err := api.channelMessageSendComplex(ctx, params.ChannelID, send)
 	if err != nil {
 		return channels.DiscordSendEmbedResult{}, fmt.Errorf("discord API: %w", err)
@@ -105,10 +117,31 @@ func sendEmbed(ctx context.Context, api embedAPI, params channels.DiscordSendEmb
 		return channels.DiscordSendEmbedResult{}, errors.New("discord API returned nil message")
 	}
 
+	if len(params.Components) > 0 {
+		slog.Info("discord: sent embed with components",
+			"channel_id", msg.ChannelID,
+			"message_id", msg.ID,
+			"embed_count", len(params.Embeds),
+			"component_rows", len(params.Components))
+	}
+
 	return channels.DiscordSendEmbedResult{
 		MessageID: msg.ID,
 		ChannelID: msg.ChannelID,
 	}, nil
+}
+
+func summarizeComponents(in []channels.DiscordMessageComponent) (rows int, buttons int, customIDs []string) {
+	rows = len(in)
+	for _, row := range in {
+		for _, b := range row.ActionRow {
+			buttons++
+			if b.CustomID != "" {
+				customIDs = append(customIDs, b.CustomID)
+			}
+		}
+	}
+	return rows, buttons, customIDs
 }
 
 // convertEmbed validates a channels.DiscordEmbed and converts it to the

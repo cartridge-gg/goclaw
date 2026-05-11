@@ -2,8 +2,10 @@ package discord
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,6 +141,7 @@ func (c *Channel) Start(ctx context.Context) error {
 	} else if app != nil {
 		c.applicationID = app.ID
 	}
+	c.logApplicationInteractionDiagnostics()
 
 	c.SetRunning(true)
 	slog.Info("discord bot connected",
@@ -174,6 +177,51 @@ func (c *Channel) Start(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (c *Channel) logApplicationInteractionDiagnostics() {
+	if c.session == nil || c.applicationID == "" {
+		return
+	}
+	body, err := c.session.RequestWithBucketID(
+		"GET",
+		discordgo.EndpointOAuth2Application("@me"),
+		nil,
+		discordgo.EndpointOAuth2Application(""),
+	)
+	if err != nil {
+		slog.Warn("discord: failed to fetch application interaction diagnostics",
+			"channel", c.Name(),
+			"app_id", c.applicationID,
+			"error", err)
+		return
+	}
+	var app struct {
+		InteractionsEndpointURL string `json:"interactions_endpoint_url"`
+		Hook                    bool   `json:"hook"`
+		Flags                   int    `json:"flags"`
+	}
+	if err := json.Unmarshal(body, &app); err != nil {
+		slog.Warn("discord: failed to decode application interaction diagnostics",
+			"channel", c.Name(),
+			"app_id", c.applicationID,
+			"error", err)
+		return
+	}
+	endpoint := strings.TrimSpace(app.InteractionsEndpointURL)
+	endpointHost := ""
+	if endpoint != "" {
+		if parsed, parseErr := url.Parse(endpoint); parseErr == nil {
+			endpointHost = parsed.Host
+		}
+	}
+	slog.Info("discord: application interaction routing",
+		"channel", c.Name(),
+		"app_id", c.applicationID,
+		"hook", app.Hook,
+		"flags", app.Flags,
+		"interactions_endpoint_configured", endpoint != "",
+		"interactions_endpoint_host", endpointHost)
 }
 
 // startVoiceSupervisor is a no-op when voice_channel_enabled is unset or

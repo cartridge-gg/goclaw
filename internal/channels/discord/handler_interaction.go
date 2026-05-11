@@ -65,14 +65,52 @@ func (c *Channel) handleInteraction(_ *discordgo.Session, i *discordgo.Interacti
 	if i == nil {
 		return
 	}
+	c.logInteractionReceived(i)
 	switch i.Type {
 	case discordgo.InteractionApplicationCommand:
 		c.handleSlashCommand(i)
 	case discordgo.InteractionMessageComponent:
 		c.handleComponentInteraction(i)
 	default:
+		slog.Info("discord: unsupported interaction ignored",
+			"interaction_id", i.ID,
+			"interaction_type", int(i.Type),
+			"channel_id", i.ChannelID,
+			"guild_id", i.GuildID,
+			"app_id", i.AppID)
 		// Autocomplete + modal submissions: not yet supported.
 	}
+}
+
+func (c *Channel) logInteractionReceived(i *discordgo.InteractionCreate) {
+	if i == nil {
+		return
+	}
+	invoker, invokerTag := resolveInteractionUser(i)
+	attrs := []any{
+		"interaction_id", i.ID,
+		"interaction_type", int(i.Type),
+		"channel", c.Name(),
+		"channel_id", i.ChannelID,
+		"guild_id", i.GuildID,
+		"app_id", i.AppID,
+		"invoker_id", invoker,
+		"invoker_tag", invokerTag,
+	}
+	switch i.Type {
+	case discordgo.InteractionApplicationCommand:
+		data := i.ApplicationCommandData()
+		attrs = append(attrs, "command", data.Name)
+	case discordgo.InteractionMessageComponent:
+		data := i.MessageComponentData()
+		attrs = append(attrs,
+			"component_type", int(data.ComponentType),
+			"custom_id", data.CustomID)
+		if i.Message != nil {
+			attrs = append(attrs, "message_id", i.Message.ID)
+		}
+	}
+	slog.Info("discord: interaction received", attrs...)
 }
 
 // handleSlashCommand is the original slash-command dispatch path. Split out of
@@ -487,6 +525,12 @@ func optionInt(data discordgo.ApplicationCommandInteractionData, name string) in
 func (c *Channel) handleComponentInteraction(i *discordgo.InteractionCreate) {
 	data := i.MessageComponentData()
 	if data.ComponentType != discordgo.ButtonComponent {
+		slog.Info("discord: unsupported component interaction ignored",
+			"interaction_id", i.ID,
+			"component_type", int(data.ComponentType),
+			"custom_id", data.CustomID,
+			"channel_id", i.ChannelID,
+			"guild_id", i.GuildID)
 		// Select menus / text inputs: not yet routed.
 		return
 	}
@@ -513,16 +557,34 @@ func (c *Channel) handleComponentInteraction(i *discordgo.InteractionCreate) {
 	// refusal so the user sees why nothing happened.
 	if isDM {
 		if !c.checkDMPolicy(ctx, invoker, channelID) {
+			slog.Info("discord: component interaction denied",
+				"reason", "dm_policy",
+				"custom_id", data.CustomID,
+				"channel_id", channelID,
+				"guild_id", i.GuildID,
+				"invoker_id", invoker)
 			c.respondComponentFollowupEphemeral(i, "Access not configured. Ask the bot owner to pair your user ID.")
 			return
 		}
 	} else {
 		if !c.checkGroupPolicy(ctx, invoker, channelID) {
+			slog.Info("discord: component interaction denied",
+				"reason", "group_policy",
+				"custom_id", data.CustomID,
+				"channel_id", channelID,
+				"guild_id", i.GuildID,
+				"invoker_id", invoker)
 			c.respondComponentFollowupEphemeral(i, "This channel isn't authorized for the bot.")
 			return
 		}
 	}
 	if !c.IsAllowed(invoker) {
+		slog.Info("discord: component interaction denied",
+			"reason", "allowlist",
+			"custom_id", data.CustomID,
+			"channel_id", channelID,
+			"guild_id", i.GuildID,
+			"invoker_id", invoker)
 		c.respondComponentFollowupEphemeral(i, "Your user isn't on the allowlist for this bot.")
 		return
 	}
@@ -546,9 +608,11 @@ func (c *Channel) handleComponentInteraction(i *discordgo.InteractionCreate) {
 	})
 
 	slog.Info("discord: component interaction dispatched",
+		"interaction_id", i.ID,
 		"custom_id", data.CustomID,
 		"channel_id", channelID,
 		"guild_id", i.GuildID,
+		"invoker_id", invoker,
 		"ack_failed", ackErr != nil)
 }
 
