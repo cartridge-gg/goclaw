@@ -490,6 +490,15 @@ func (c *Channel) handleComponentInteraction(i *discordgo.InteractionCreate) {
 		// Select menus / text inputs: not yet routed.
 		return
 	}
+
+	// Discord gives message-component handlers only ~3s to acknowledge the
+	// click. Do this before policy/store work so transient DB latency cannot
+	// surface as "This interaction failed" to the user.
+	ackErr := c.session.InteractionRespond(i.Interaction, componentInteractionACK())
+	if ackErr != nil {
+		slog.Warn("discord: deferred ACK failed for component interaction", "custom_id", data.CustomID, "error", ackErr)
+	}
+
 	invoker, invokerTag := resolveInteractionUser(i)
 	channelID := i.ChannelID
 	isDM := i.GuildID == ""
@@ -504,24 +513,18 @@ func (c *Channel) handleComponentInteraction(i *discordgo.InteractionCreate) {
 	// refusal so the user sees why nothing happened.
 	if isDM {
 		if !c.checkDMPolicy(ctx, invoker, channelID) {
-			c.respondEphemeral(i, "Access not configured. Ask the bot owner to pair your user ID.")
+			c.respondComponentFollowupEphemeral(i, "Access not configured. Ask the bot owner to pair your user ID.")
 			return
 		}
 	} else {
 		if !c.checkGroupPolicy(ctx, invoker, channelID) {
-			c.respondEphemeral(i, "This channel isn't authorized for the bot.")
+			c.respondComponentFollowupEphemeral(i, "This channel isn't authorized for the bot.")
 			return
 		}
 	}
 	if !c.IsAllowed(invoker) {
-		c.respondEphemeral(i, "Your user isn't on the allowlist for this bot.")
+		c.respondComponentFollowupEphemeral(i, "Your user isn't on the allowlist for this bot.")
 		return
-	}
-
-	if err := c.session.InteractionRespond(i.Interaction, componentInteractionACK()); err != nil {
-		slog.Warn("discord: deferred ACK failed for component interaction", "custom_id", data.CustomID, "error", err)
-		// Keep going — the agent reply will fall back to a regular channel
-		// post when Send() can't find a usable interaction token.
 	}
 
 	metadata := buildComponentInteractionMetadata(i.ID, invoker, invokerTag, i.GuildID, channelID, isDM, data.CustomID, i.Message)
@@ -541,11 +544,26 @@ func (c *Channel) handleComponentInteraction(i *discordgo.InteractionCreate) {
 		TenantID: c.TenantID(),
 		Metadata: metadata,
 	})
+
+	slog.Info("discord: component interaction dispatched",
+		"custom_id", data.CustomID,
+		"channel_id", channelID,
+		"guild_id", i.GuildID,
+		"ack_failed", ackErr != nil)
 }
 
 func componentInteractionACK() *discordgo.InteractionResponse {
 	return &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredMessageUpdate,
+	}
+}
+
+func (c *Channel) respondComponentFollowupEphemeral(i *discordgo.InteractionCreate, content string) {
+	if _, err := c.session.FollowupMessageCreate(i.Interaction, false, &discordgo.WebhookParams{
+		Content: content,
+		Flags:   discordgo.MessageFlagsEphemeral,
+	}); err != nil {
+		slog.Warn("discord: component followup failed", "error", err)
 	}
 }
 
