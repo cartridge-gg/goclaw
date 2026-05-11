@@ -28,6 +28,9 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatRespon
 		} else if stripped := stripTemperatureFromError(err, body); stripped {
 			slog.Info("temperature omitted after provider rejection, retrying", "model", model)
 			resp, err = RetryDo(ctx, p.retryConfig, chatFn)
+		} else if stripped := stripReasoningEffortFromError(err, body); stripped {
+			slog.Info("reasoning_effort omitted after provider rejection, retrying", "model", model)
+			resp, err = RetryDo(ctx, p.retryConfig, chatFn)
 		}
 	}
 
@@ -84,6 +87,11 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req ChatRequest, onChun
 			})
 		} else if stripped := stripTemperatureFromError(err, body); stripped {
 			slog.Info("temperature omitted after provider rejection, retrying stream", "model", model)
+			respBody, err = RetryDo(ctx, p.retryConfig, func() (io.ReadCloser, error) {
+				return p.doRequest(ctx, body)
+			})
+		} else if stripped := stripReasoningEffortFromError(err, body); stripped {
+			slog.Info("reasoning_effort omitted after provider rejection, retrying stream", "model", model)
 			respBody, err = RetryDo(ctx, p.retryConfig, func() (io.ReadCloser, error) {
 				return p.doRequest(ctx, body)
 			})
