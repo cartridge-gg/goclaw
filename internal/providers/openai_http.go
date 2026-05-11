@@ -187,6 +187,29 @@ func stripTemperatureFromError(err error, body map[string]any) bool {
 	return true
 }
 
+// stripReasoningEffortFromError checks if OpenAI rejects reasoning_effort on
+// the Chat Completions transport, notably for GPT-5.5 function-tool calls that
+// require the Responses API for explicit reasoning effort. Removing the field
+// preserves the turn instead of failing the entire agent run.
+func stripReasoningEffortFromError(err error, body map[string]any) bool {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusBadRequest {
+		return false
+	}
+	if _, ok := body[OptReasoningEffort]; !ok {
+		return false
+	}
+	bodyText := strings.ToLower(httpErr.Body)
+	if !strings.Contains(bodyText, OptReasoningEffort) {
+		return false
+	}
+	if !strings.Contains(bodyText, "/v1/responses") && !strings.Contains(bodyText, "not supported") {
+		return false
+	}
+	delete(body, OptReasoningEffort)
+	return true
+}
+
 // clampedLimit returns the clamped max_tokens or max_completion_tokens value for logging.
 func clampedLimit(body map[string]any) any {
 	if v, ok := body["max_completion_tokens"]; ok {

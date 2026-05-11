@@ -156,6 +156,28 @@ func TestStripTemperatureFromError(t *testing.T) {
 	}
 }
 
+func TestStripReasoningEffortFromError(t *testing.T) {
+	body := map[string]any{
+		"model":            "gpt-5.5",
+		OptReasoningEffort: "xhigh",
+		"tools":            []any{map[string]any{"type": "function"}},
+	}
+	err := &HTTPError{
+		Status: 400,
+		Body:   `openai: {"error":{"message":"Function tools with reasoning_effort are not supported for gpt-5.5 in /v1/chat/completions. Please use /v1/responses instead.","param":"reasoning_effort"}}`,
+	}
+
+	if !stripReasoningEffortFromError(err, body) {
+		t.Fatal("expected reasoning_effort rejection to be handled")
+	}
+	if _, ok := body[OptReasoningEffort]; ok {
+		t.Fatal("reasoning_effort should be removed before retry")
+	}
+	if _, ok := body["tools"]; !ok {
+		t.Fatal("tools should be preserved for retry")
+	}
+}
+
 func TestBuildRequestBody_ReasoningEffortOpenAIOnly(t *testing.T) {
 	thinkOpts := map[string]any{OptThinkingLevel: "medium"}
 
