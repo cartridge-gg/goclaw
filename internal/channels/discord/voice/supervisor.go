@@ -617,11 +617,10 @@ func (s *Supervisor) leaveLocked(reason string) {
 				duration = time.Since(startedAt)
 			}
 			// Budget covers up to two REST calls (delete-thread +
-			// delete-summary on the empty-session path) OR an LLM
-			// summarizer call + summary-message edit on the
-			// non-empty path. 30s is generous for both; a wedged
-			// provider can't pin the supervisor longer than that.
-			closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			// delete-summary on the empty-session path) OR a bounded
+			// LLM summarizer call plus a separate final-summary edit
+			// on the non-empty path.
+			closeCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			output.Close(closeCtx, duration)
 			cancel()
 		}
