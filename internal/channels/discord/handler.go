@@ -44,6 +44,10 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 		peerKind = "direct"
 	}
 
+	if peerKind == "group" && c.tryHandleVoiceSummaryRegenerationRequest(ctx, m, senderID) {
+		return
+	}
+
 	if isDM {
 		if !c.checkDMPolicy(ctx, senderID, channelID) {
 			return
