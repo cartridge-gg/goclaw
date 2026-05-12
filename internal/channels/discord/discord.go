@@ -21,6 +21,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/channels/discord/voice"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/typing"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/jobs"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
@@ -39,19 +40,21 @@ const (
 // Channel connects to Discord via the Bot API using gateway events.
 type Channel struct {
 	*channels.BaseChannel
-	session            *discordgo.Session
-	config             config.DiscordConfig
-	botUserID          string                                    // populated on start
-	applicationID      string                                    // populated on start; required for slash-command registration
-	testGuildID        string                                    // optional: dev-only guild for instant command propagation (empty = global)
-	placeholders       sync.Map                                  // placeholderKey string → messageID string
-	typingCtrls        sync.Map                                  // channelID string → *typing.Controller
-	interactionTokens  sync.Map                                  // discord interaction ID string → *interactionEcho (reply via interaction token)
-	agentStore         store.AgentStore                          // for agent key lookup (nil = writer commands disabled)
-	configPermStore    store.ConfigPermissionStore               // for group file writer management (nil = writer commands disabled)
-	audioMgr           *audio.Manager                            // unified STT via audio.Manager (nil = no STT)
-	voiceSupervisor    *voice.Supervisor                         // real-time voice-channel join + transcription (nil = disabled)
-	voiceSummarizerCfg *channels.VoiceTranscriptSummarizerConfig // optional LLM summarizer for voice session close (nil = stats line only)
+	session             *discordgo.Session
+	config              config.DiscordConfig
+	botUserID           string                                    // populated on start
+	applicationID       string                                    // populated on start; required for slash-command registration
+	testGuildID         string                                    // optional: dev-only guild for instant command propagation (empty = global)
+	placeholders        sync.Map                                  // placeholderKey string → messageID string
+	typingCtrls         sync.Map                                  // channelID string → *typing.Controller
+	interactionTokens   sync.Map                                  // discord interaction ID string → *interactionEcho (reply via interaction token)
+	agentStore          store.AgentStore                          // for agent key lookup (nil = writer commands disabled)
+	configPermStore     store.ConfigPermissionStore               // for group file writer management (nil = writer commands disabled)
+	audioMgr            *audio.Manager                            // unified STT via audio.Manager (nil = no STT)
+	voiceSupervisor     *voice.Supervisor                         // real-time voice-channel join + transcription (nil = disabled)
+	voiceJobCoordinator *voiceJobCoordinator                      // job-backed real-time voice coordinator (nil = disabled)
+	jobSvc              *jobs.Service                             // internal agent-service job spawner (nil = job runner unavailable)
+	voiceSummarizerCfg  *channels.VoiceTranscriptSummarizerConfig // optional LLM summarizer for voice session close (nil = stats line only)
 	// pairingService, pairingDebounce, approvedGroups, groupHistory, historyLimit, requireMention
 	// are inherited from channels.BaseChannel.
 }
@@ -266,6 +269,30 @@ func (c *Channel) startVoiceSupervisor(ctx context.Context) error {
 	if c.config.VoiceChannelEnabled == nil || !*c.config.VoiceChannelEnabled {
 		return nil
 	}
+	if strings.EqualFold(strings.TrimSpace(c.config.VoiceChannelRunner), "job") {
+		if c.jobSvc == nil {
+			return fmt.Errorf("voice_channel_runner=job but no jobs.Service wired (check gateway.jobs_callback_secret)")
+		}
+		coord, err := newVoiceJobCoordinator(voiceJobCoordinatorConfig{
+			channelName: c.Name(),
+			session:     c.session,
+			jobSvc:      c.jobSvc,
+			discordCfg:  c.config,
+			botUserID:   c.botUserID,
+			log:         slog.Default(),
+		})
+		if err != nil {
+			return err
+		}
+		coord.Start(ctx)
+		c.voiceJobCoordinator = coord
+		slog.Info("discord: voice job coordinator started",
+			"voice_channel_id", c.config.VoiceChannelID,
+			"transcript_channel_id", c.config.VoiceChannelTranscriptChannelID,
+			"channel", c.Name(),
+		)
+		return nil
+	}
 	if c.audioMgr == nil {
 		return fmt.Errorf("voice_channel_enabled=true but no audio.Manager wired (check STT provider config)")
 	}
@@ -340,6 +367,12 @@ func (c *Channel) SetVoiceTranscriptSummarizer(cfg *channels.VoiceTranscriptSumm
 	c.voiceSummarizerCfg = cfg
 }
 
+// SetJobService wires the internal agent-service job spawner used by
+// voice_channel_runner=job.
+func (c *Channel) SetJobService(svc *jobs.Service) {
+	c.jobSvc = svc
+}
+
 // SetPendingHistoryTenantID propagates tenant_id to the pending history for DB operations.
 func (c *Channel) SetPendingHistoryTenantID(id uuid.UUID) {
 	if gh := c.GroupHistory(); gh != nil {
@@ -357,6 +390,12 @@ func (c *Channel) SetPendingHistoryTenantID(id uuid.UUID) {
 // shutdown. If the caller already passed a ctx with a deadline, we honor
 // the tighter of the two.
 func (c *Channel) Stop(ctx context.Context) error {
+	if c.voiceJobCoordinator != nil {
+		voiceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		c.voiceJobCoordinator.Stop(voiceCtx)
+		cancel()
+		c.voiceJobCoordinator = nil
+	}
 	if c.voiceSupervisor != nil {
 		voiceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		c.voiceSupervisor.Stop(voiceCtx)

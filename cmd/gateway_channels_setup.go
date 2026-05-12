@@ -23,13 +23,14 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway/methods"
+	"github.com/nextlevelbuilder/goclaw/internal/jobs"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
 // registerConfigChannels registers config-based channels as fallback when no DB instances are loaded.
 // audioMgr is optional (nil = STT disabled for channels).
-func registerConfigChannels(cfg *config.Config, channelMgr *channels.Manager, msgBus *bus.MessageBus, pgStores *store.Stores, instanceLoader *channels.InstanceLoader, audioMgr *audio.Manager) {
+func registerConfigChannels(cfg *config.Config, channelMgr *channels.Manager, msgBus *bus.MessageBus, pgStores *store.Stores, instanceLoader *channels.InstanceLoader, audioMgr *audio.Manager, jobSvc *jobs.Service) {
 	if instanceLoader != nil {
 		return
 	}
@@ -64,6 +65,7 @@ func registerConfigChannels(cfg *config.Config, channelMgr *channels.Manager, ms
 			channelMgr.RecordFailure(channels.TypeDiscord, "", err)
 			slog.Error("failed to initialize discord channel", "error", err)
 		} else {
+			dc.SetJobService(jobSvc)
 			channelMgr.RegisterChannel(channels.TypeDiscord, dc)
 			slog.Info("discord channel enabled (config)")
 		}
@@ -270,4 +272,3 @@ func wireChannelEventSubscribers(
 		})
 	}
 }
-

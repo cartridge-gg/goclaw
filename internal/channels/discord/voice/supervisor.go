@@ -556,6 +556,10 @@ func (s *Supervisor) onJoinSuccess(vc *discordgo.VoiceConnection) {
 	dm := newDemux(s.cfg, vc, tr.inbox(), s.log)
 	dm.start(context.Background())
 	s.state.demux = dm
+
+	if s.cfg.OnJoin != nil {
+		go s.cfg.OnJoin()
+	}
 }
 
 // leaveLocked tears down the active VoiceConnection and the subsystems
@@ -602,6 +606,11 @@ func (s *Supervisor) leaveLocked(reason string) {
 	go func() {
 		defer s.wg.Done()
 		defer safego.Recover(nil, "component", "voice.supervisor.leave")
+		defer func() {
+			if s.cfg.OnLeave != nil {
+				s.cfg.OnLeave(reason)
+			}
+		}()
 		if wd != nil {
 			wd.stop()
 		}

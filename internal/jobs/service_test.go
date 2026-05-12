@@ -39,6 +39,7 @@ func TestService_Spawn_HappyPath(t *testing.T) {
 		Command:       "/app/agent/bin/run-voice-summary",
 		WorktreePath:  "/data/wt/x",
 		Sinks:         []Sink{{Type: "discord", Channel: "c", ThreadID: "t"}},
+		DedupKey:      "voice:discord-eng:960655952116346931",
 		Model:         "deepseek/deepseek-v4-pro",
 		Provider:      "openrouter",
 		ActivateSkill: "voice-session-summarization",
@@ -51,6 +52,9 @@ func TestService_Spawn_HappyPath(t *testing.T) {
 	}
 	if captured.Model != "deepseek/deepseek-v4-pro" || captured.ActivateSkill != "voice-session-summarization" {
 		t.Errorf("override fields not forwarded: %+v", captured)
+	}
+	if captured.DedupKey != "voice:discord-eng:960655952116346931" {
+		t.Errorf("dedup key not forwarded: %+v", captured)
 	}
 	if !strings.HasPrefix(capturedSig, "sha256=") {
 		t.Errorf("missing/invalid HMAC signature: %q", capturedSig)

@@ -73,6 +73,11 @@ type Config struct {
 	// text replaces the parent summary message body. Optional — leaving
 	// it nil keeps the legacy stats-line behaviour. See type doc.
 	TranscriptSummarizer TranscriptSummarizer
+
+	// OnJoin and OnLeave are optional lifecycle hooks for standalone
+	// voice-worker processes. Implementations must return quickly.
+	OnJoin  func()
+	OnLeave func(reason string)
 }
 
 // ApplyDefaults returns a copy of c with zero fields replaced by defaults.
