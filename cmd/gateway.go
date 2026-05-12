@@ -34,6 +34,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/gateway/methods"
 	"github.com/nextlevelbuilder/goclaw/internal/hooks"
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
+	jobsvc "github.com/nextlevelbuilder/goclaw/internal/jobs"
 	kg "github.com/nextlevelbuilder/goclaw/internal/knowledgegraph"
 	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/media"
@@ -326,6 +327,10 @@ func runGateway() {
 	}
 
 	gatewayAddr := loopbackAddr(cfg.Gateway.Host, cfg.Gateway.Port)
+	var internalJobSvc *jobsvc.Service
+	if cfg.Gateway.JobsCallbackSecret != "" {
+		internalJobSvc = jobsvc.NewService(cfg.Gateway.AgentServiceURL, []byte(cfg.Gateway.JobsCallbackSecret))
+	}
 	var mcpToolLister httpapi.MCPToolLister
 	if mcpMgr != nil {
 		mcpToolLister = mcpMgr
@@ -480,9 +485,11 @@ func runGateway() {
 			tc.SetChannelTenantChecker(channelMgr.ChannelTenantID)
 		}
 		if sf, ok := t.(*tools.SpawnJobTool); ok {
-			sf.SetAgentServiceURL(cfg.Gateway.AgentServiceURL)
-			if cfg.Gateway.JobsCallbackSecret != "" {
-				sf.SetHMACSecret([]byte(cfg.Gateway.JobsCallbackSecret))
+			if internalJobSvc != nil {
+				sf.SetAgentServiceURL(internalJobSvc.AgentURL())
+				sf.SetHMACSecret(internalJobSvc.HMACSecret())
+			} else {
+				sf.SetAgentServiceURL(cfg.Gateway.AgentServiceURL)
 			}
 		}
 	}
@@ -522,7 +529,7 @@ func runGateway() {
 			})
 		}
 		instanceLoader.RegisterFactory(channels.TypeTelegram, telegram.FactoryWithStoresAndAudio(pgStores.Agents, pgStores.ConfigPermissions, pgStores.Teams, pgStores.SubagentTasks, pgStores.PendingMessages, audioMgr))
-		instanceLoader.RegisterFactory(channels.TypeDiscord, discord.FactoryWithStoresAndAudio(pgStores.Agents, pgStores.ConfigPermissions, pgStores.PendingMessages, audioMgr))
+		instanceLoader.RegisterFactory(channels.TypeDiscord, discord.FactoryWithStoresAudioJobs(pgStores.Agents, pgStores.ConfigPermissions, pgStores.PendingMessages, audioMgr, internalJobSvc))
 		instanceLoader.RegisterFactory(channels.TypeFeishu, feishu.FactoryWithPendingStoreAndAudio(pgStores.PendingMessages, audioMgr))
 		instanceLoader.RegisterFactory(channels.TypeZaloOA, zalo.Factory)
 		instanceLoader.RegisterFactory(channels.TypeZaloPersonal, zalopersonal.FactoryWithPendingStore(pgStores.PendingMessages))
@@ -536,7 +543,7 @@ func runGateway() {
 	}
 
 	// Register config-based channels as fallback when no DB instances loaded.
-	registerConfigChannels(cfg, channelMgr, msgBus, pgStores, instanceLoader, audioMgr)
+	registerConfigChannels(cfg, channelMgr, msgBus, pgStores, instanceLoader, audioMgr, internalJobSvc)
 
 	// Register channels/instances/links/teams RPC methods
 	wireChannelRPCMethods(server, pgStores, channelMgr, agentRouter, msgBus, workspace)

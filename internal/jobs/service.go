@@ -48,6 +48,7 @@ type Request struct {
 	Sinks         []Sink            `json:"sinks"`
 	TenantID      string            `json:"tenant_id,omitempty"`
 	ParentSession string            `json:"parent_session_key,omitempty"`
+	DedupKey      string            `json:"dedup_key,omitempty"`
 	Model         string            `json:"model,omitempty"`
 	Provider      string            `json:"provider,omitempty"`
 	ActivateSkill string            `json:"activate_skill,omitempty"`

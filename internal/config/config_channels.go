@@ -175,6 +175,7 @@ type DiscordConfig struct {
 	VoiceChannelMinUtteranceMs      int    `json:"voice_channel_min_utterance_ms,omitempty"`      // drop utterances shorter than this (default 400)
 	VoiceChannelMaxUtteranceMs      int    `json:"voice_channel_max_utterance_ms,omitempty"`      // force-flush ceiling (default 10000)
 	VoiceChannelDailyCapSeconds     int    `json:"voice_channel_daily_cap_seconds,omitempty"`     // per-day audio-seconds STT budget (default 7200)
+	VoiceChannelRunner              string `json:"voice_channel_runner,omitempty"`                // "in_process" (default) or "job" for a per-session Kubernetes job
 }
 
 type SlackConfig struct {

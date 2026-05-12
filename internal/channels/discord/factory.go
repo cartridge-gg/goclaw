@@ -8,6 +8,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/jobs"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
@@ -46,12 +47,13 @@ type discordInstanceConfig struct {
 	VoiceChannelMinUtteranceMs      int    `json:"voice_channel_min_utterance_ms,omitempty"`
 	VoiceChannelMaxUtteranceMs      int    `json:"voice_channel_max_utterance_ms,omitempty"`
 	VoiceChannelDailyCapSeconds     int    `json:"voice_channel_daily_cap_seconds,omitempty"`
+	VoiceChannelRunner              string `json:"voice_channel_runner,omitempty"`
 }
 
 // Factory creates a Discord channel from DB instance data (no extra stores).
 func Factory(name string, creds json.RawMessage, cfg json.RawMessage,
 	msgBus *bus.MessageBus, pairingSvc store.PairingStore) (channels.Channel, error) {
-	return buildChannel(name, creds, cfg, msgBus, pairingSvc, nil, nil, nil, nil)
+	return buildChannel(name, creds, cfg, msgBus, pairingSvc, nil, nil, nil, nil, nil)
 }
 
 // FactoryWithStores returns a ChannelFactory that includes agent, configPerm, and pending message stores.
@@ -61,16 +63,21 @@ func FactoryWithStores(agentStore store.AgentStore, configPermStore store.Config
 
 // FactoryWithStoresAndAudio returns a ChannelFactory with all stores and STT support.
 func FactoryWithStoresAndAudio(agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, pendingStore store.PendingMessageStore, audioMgr *audio.Manager) channels.ChannelFactory {
+	return FactoryWithStoresAudioJobs(agentStore, configPermStore, pendingStore, audioMgr, nil)
+}
+
+// FactoryWithStoresAudioJobs returns a ChannelFactory with stores, STT, and internal job spawning support.
+func FactoryWithStoresAudioJobs(agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, pendingStore store.PendingMessageStore, audioMgr *audio.Manager, jobSvc *jobs.Service) channels.ChannelFactory {
 	return func(name string, creds json.RawMessage, cfg json.RawMessage,
 		msgBus *bus.MessageBus, pairingSvc store.PairingStore) (channels.Channel, error) {
-		return buildChannel(name, creds, cfg, msgBus, pairingSvc, agentStore, configPermStore, pendingStore, audioMgr)
+		return buildChannel(name, creds, cfg, msgBus, pairingSvc, agentStore, configPermStore, pendingStore, audioMgr, jobSvc)
 	}
 }
 
 func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
 	msgBus *bus.MessageBus, pairingSvc store.PairingStore,
 	agentStore store.AgentStore, configPermStore store.ConfigPermissionStore,
-	pendingStore store.PendingMessageStore, audioMgr *audio.Manager) (channels.Channel, error) {
+	pendingStore store.PendingMessageStore, audioMgr *audio.Manager, jobSvc *jobs.Service) (channels.Channel, error) {
 
 	var c discordCreds
 	if len(creds) > 0 {
@@ -115,6 +122,7 @@ func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
 		VoiceChannelMinUtteranceMs:      ic.VoiceChannelMinUtteranceMs,
 		VoiceChannelMaxUtteranceMs:      ic.VoiceChannelMaxUtteranceMs,
 		VoiceChannelDailyCapSeconds:     ic.VoiceChannelDailyCapSeconds,
+		VoiceChannelRunner:              ic.VoiceChannelRunner,
 	}
 
 	// DB instances default to "pairing" for groups (secure by default).
@@ -127,6 +135,7 @@ func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
 		return nil, err
 	}
 
+	ch.SetJobService(jobSvc)
 	ch.SetName(name)
 	return ch, nil
 }

@@ -22,6 +22,12 @@ func newMemoryStoreAdapter(ms store.MemoryStore) MemoryQueryer {
 	return &memoryStoreAdapter{ms: ms}
 }
 
+// NewVoiceMemoryQueryer bridges store.MemoryStore to the voice summarizer's
+// memory interface for callers outside the channels package.
+func NewVoiceMemoryQueryer(ms store.MemoryStore) MemoryQueryer {
+	return newMemoryStoreAdapter(ms)
+}
+
 func (a *memoryStoreAdapter) Search(ctx context.Context, query, agentID, userID string, opts MemorySearchOpts) ([]MemorySnippet, error) {
 	results, err := a.ms.Search(ctx, query, agentID, userID, store.MemorySearchOptions{
 		MaxResults: opts.MaxResults,
