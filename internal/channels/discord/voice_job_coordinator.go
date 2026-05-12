@@ -123,6 +123,7 @@ func (c *voiceJobCoordinator) Start(ctx context.Context) {
 			select {
 			case <-ticker.C:
 				c.mu.Lock()
+				c.syncHumansFromStateLocked()
 				c.reconcileLocked()
 				c.mu.Unlock()
 			case <-ctx.Done():
@@ -209,22 +210,35 @@ func (c *voiceJobCoordinator) onOwnVoiceState(ev *discordgo.VoiceStateUpdate) {
 }
 
 func (c *voiceJobCoordinator) primeFromState() {
-	if c.session.State == nil || c.resolvedGuildID == "" {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.syncHumansFromStateLocked() {
 		return
+	}
+	c.reconcileLocked()
+}
+
+func (c *voiceJobCoordinator) syncHumansFromStateLocked() bool {
+	if c.session.State == nil || c.resolvedGuildID == "" {
+		return false
 	}
 	guild, err := c.session.State.Guild(c.resolvedGuildID)
 	if err != nil || guild == nil {
-		return
+		return false
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	next := make(map[string]struct{})
 	for _, vs := range guild.VoiceStates {
 		if vs == nil || vs.ChannelID != c.discordCfg.VoiceChannelID || vs.UserID == c.botUserID {
 			continue
 		}
-		c.humans[vs.UserID] = struct{}{}
+		next[vs.UserID] = struct{}{}
 	}
-	c.reconcileLocked()
+	if samePresenceSet(c.humans, next) {
+		return true
+	}
+	c.humans = next
+	c.log.Debug("voice job coordinator: synced voice presence from gateway state", "humans", len(next))
+	return true
 }
 
 func (c *voiceJobCoordinator) reconcileLocked() {
@@ -320,4 +334,16 @@ func safeVoiceJobName(s string) string {
 		return "voice"
 	}
 	return out
+}
+
+func samePresenceSet(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
 }

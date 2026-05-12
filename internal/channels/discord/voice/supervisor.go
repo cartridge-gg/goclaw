@@ -15,6 +15,8 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/safego"
 )
 
+const presenceSyncInterval = 15 * time.Second
+
 // ErrMissingConfig is returned from NewSupervisor when required config
 // fields are empty. We fail fast rather than silently no-op — a misconfig
 // that makes the bot join without a transcript destination is strictly
@@ -186,6 +188,7 @@ func (s *Supervisor) Start(ctx context.Context) {
 	// disabled in the parent session config, in which case we rely on
 	// future VoiceStateUpdate deltas.
 	s.primeFromState()
+	s.startPresenceSync(ctx)
 	// Parent-context cancellation closes our stopCh so goroutines drain
 	// cleanly without requiring the caller to also call Stop(). Stop() is
 	// still the preferred shutdown path because it waits for drain; ctx
@@ -348,15 +351,57 @@ func (s *Supervisor) onOwnVoiceState(ev *discordgo.VoiceStateUpdate) {
 // primeFromState reads discordgo.State if enabled and seeds humans[] so we
 // can join immediately on boot if a call is already in progress.
 func (s *Supervisor) primeFromState() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.syncHumansFromStateLocked() {
+		return
+	}
+	s.reconcileLocked()
+}
+
+func (s *Supervisor) startPresenceSync(ctx context.Context) {
 	if s.session.State == nil || s.resolvedGuildID == "" {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer safego.Recover(nil, "component", "voice.supervisor.presence-sync")
+		ticker := time.NewTicker(presenceSyncInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.mu.Lock()
+				if s.syncHumansFromStateLocked() {
+					s.reconcileLocked()
+				}
+				s.mu.Unlock()
+			case <-ctx.Done():
+				return
+			case <-s.stopCh:
+				return
+			}
+		}
+	}()
+}
+
+// syncHumansFromStateLocked reconciles our presence set with discordgo's
+// gateway cache. Discord voice events are the hot path, but this periodic
+// sync recovers when a leave event is missed or processed before our handler
+// registers during startup.
+func (s *Supervisor) syncHumansFromStateLocked() bool {
+	if s.session.State == nil || s.resolvedGuildID == "" {
+		return false
+	}
 	guild, err := s.session.State.Guild(s.resolvedGuildID)
 	if err != nil || guild == nil {
-		return
+		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	next := make(map[string]struct{})
 	for _, vs := range guild.VoiceStates {
 		if vs == nil || vs.ChannelID != s.cfg.VoiceChannelID {
 			continue
@@ -364,9 +409,26 @@ func (s *Supervisor) primeFromState() {
 		if vs.UserID == s.botUserID {
 			continue
 		}
-		s.state.humans[vs.UserID] = struct{}{}
+		next[vs.UserID] = struct{}{}
 	}
-	s.reconcileLocked()
+	if samePresenceSet(s.state.humans, next) {
+		return true
+	}
+	s.state.humans = next
+	s.log.Debug("voice: synced voice presence from gateway state", "humans", len(next))
+	return true
+}
+
+func samePresenceSet(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // ----- reconcile (mu held) -----

@@ -279,6 +279,37 @@ func Test_reconcile_cancels_idle_timer_on_rejoin(t *testing.T) {
 	}
 }
 
+func Test_syncHumansFromState_removes_stale_human_and_arms_idle_timer(t *testing.T) {
+	sup := newTestSupervisor(t, Config{IdleLeaveSeconds: 300})
+	state := discordgo.NewState()
+	if err := state.GuildAdd(&discordgo.Guild{
+		ID:          sup.resolvedGuildID,
+		VoiceStates: []*discordgo.VoiceState{},
+	}); err != nil {
+		t.Fatalf("GuildAdd: %v", err)
+	}
+	sup.session.State = state
+
+	sup.mu.Lock()
+	sup.state.vc = &discordgo.VoiceConnection{}
+	sup.state.humans["stale-human"] = struct{}{}
+	ok := sup.syncHumansFromStateLocked()
+	sup.reconcileLocked()
+	gotHumans := len(sup.state.humans)
+	timerArmed := sup.state.idleLeaveTimer != nil
+	sup.mu.Unlock()
+
+	if !ok {
+		t.Fatal("expected gateway state sync to run")
+	}
+	if gotHumans != 0 {
+		t.Fatalf("stale humans not removed: %d", gotHumans)
+	}
+	if !timerArmed {
+		t.Fatal("idle-leave timer not armed after state sync removed last human")
+	}
+}
+
 // --- config defaults -------------------------------------------------------
 
 func Test_ApplyDefaults_preserves_set_values(t *testing.T) {
