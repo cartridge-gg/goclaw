@@ -275,6 +275,20 @@ func processNormalMessage(
 		extraPrompt += identity
 	}
 
+	if componentPrompt := buildTrustedComponentPrompt(msg.Metadata); componentPrompt != "" {
+		if extraPrompt != "" {
+			extraPrompt += "\n\n"
+		}
+		extraPrompt += componentPrompt
+		slog.Info("inbound: trusted component metadata attached",
+			"channel", msg.Channel,
+			"chat_id", msg.ChatID,
+			"button_custom_id", msg.Metadata["button_custom_id"],
+			"component_parent_channel", msg.Metadata["component_parent_channel"],
+			"component_parent_message", msg.Metadata["component_parent_message"],
+		)
+	}
+
 	// Per-topic skill filter override (from group/topic config hierarchy).
 	var skillFilter []string
 	if ts := msg.Metadata[tools.MetaTopicSkills]; ts != "" {
@@ -538,4 +552,33 @@ func processNormalMessage(
 			go autoSetFollowup(ctx, deps.TeamStore, deps.AgentStore, agentKey, channel, chatID, replyContent)
 		}
 	}(agentID, msg.Channel, msg.ChatID, sessionKey, runID, peerKind, msg.Content, outMeta, blockReply, ptd, msg.TenantID, agentLoop.UUID(), agentLoop.OtherConfig())
+}
+
+func buildTrustedComponentPrompt(metadata map[string]string) string {
+	if metadata == nil || metadata["interaction_kind"] != "component" {
+		return ""
+	}
+
+	lines := []string{
+		"[Trusted platform event metadata]",
+		"This wake came from a platform component interaction, not typed text.",
+		"If a skill asks for WAKE_JSON metadata, use this trusted metadata block as the equivalent platform wake metadata.",
+	}
+	for _, key := range []string{
+		"interaction_kind",
+		"component_type",
+		"button_custom_id",
+		"component_parent_channel",
+		"component_parent_message",
+		"channel_id",
+		"guild_id",
+		"user_id",
+		"message_id",
+	} {
+		if value := strings.TrimSpace(metadata[key]); value != "" {
+			lines = append(lines, fmt.Sprintf("%s: %s", key, value))
+		}
+	}
+	lines = append(lines, "[/Trusted platform event metadata]")
+	return strings.Join(lines, "\n")
 }
