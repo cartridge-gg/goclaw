@@ -648,6 +648,13 @@ func (s *Supervisor) leaveLocked(reason string) {
 		return
 	}
 
+	if s.cfg.StopAfterSession {
+		s.stopOnce.Do(func() {
+			s.stopped.Store(true)
+			close(s.stopCh)
+		})
+	}
+
 	s.log.Info("voice: leaving voice channel", "reason", reason)
 
 	// Tear down in reverse order of construction so producers stop before

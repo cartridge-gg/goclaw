@@ -74,6 +74,14 @@ type Config struct {
 	// it nil keeps the legacy stats-line behaviour. See type doc.
 	TranscriptSummarizer TranscriptSummarizer
 
+	// StopAfterSession makes this supervisor a one-shot session runner:
+	// once an active voice session begins teardown, future voice-state
+	// updates are ignored and the caller's OnLeave hook fires after
+	// transcript drain, final summary generation, and disconnect finish.
+	// Standalone Kubernetes voice-worker jobs use this so one Job maps to
+	// one voice session.
+	StopAfterSession bool
+
 	// OnJoin and OnLeave are optional lifecycle hooks for standalone
 	// voice-worker processes. Implementations must return quickly.
 	OnJoin  func()

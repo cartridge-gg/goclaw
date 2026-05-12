@@ -112,6 +112,7 @@ func RunVoiceWorker(ctx context.Context, cfg VoiceWorkerConfig) error {
 		MinUtteranceMs:      ic.VoiceChannelMinUtteranceMs,
 		MaxUtteranceMs:      ic.VoiceChannelMaxUtteranceMs,
 		DailyCapSeconds:     ic.VoiceChannelDailyCapSeconds,
+		StopAfterSession:    true,
 	}
 	if summarizer := buildWorkerVoiceSummarizer(ctx, cfg, inst); summarizer != nil {
 		vcfg.TranscriptSummarizer = summarizer

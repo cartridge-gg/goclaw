@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"context"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -308,6 +309,45 @@ func Test_syncHumansFromState_removes_stale_human_and_arms_idle_timer(t *testing
 	if !timerArmed {
 		t.Fatal("idle-leave timer not armed after state sync removed last human")
 	}
+}
+
+func Test_leaveLocked_stopAfterSession_suppresses_rejoin(t *testing.T) {
+	sup := newTestSupervisor(t, Config{StopAfterSession: true})
+	sup.mu.Lock()
+	sup.state.vc = &discordgo.VoiceConnection{}
+	sup.leaveLocked("idle_timeout")
+	stopped := sup.stopped.Load()
+	stopClosed := false
+	select {
+	case <-sup.stopCh:
+		stopClosed = true
+	default:
+	}
+	sup.mu.Unlock()
+
+	if !stopped {
+		t.Fatal("StopAfterSession should mark supervisor stopped during leave")
+	}
+	if !stopClosed {
+		t.Fatal("StopAfterSession should close stopCh during leave")
+	}
+
+	sup.onVoiceStateUpdate(nil, &discordgo.VoiceStateUpdate{VoiceState: &discordgo.VoiceState{
+		GuildID:   sup.resolvedGuildID,
+		ChannelID: sup.cfg.VoiceChannelID,
+		UserID:    "u-rejoin",
+	}})
+	sup.mu.Lock()
+	gotHumans := len(sup.state.humans)
+	joinScheduled := sup.state.joinScheduled
+	sup.mu.Unlock()
+	if gotHumans != 0 || joinScheduled {
+		t.Fatalf("stopped one-shot supervisor accepted rejoin: humans=%d joinScheduled=%v", gotHumans, joinScheduled)
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	sup.Stop(stopCtx)
 }
 
 // --- config defaults -------------------------------------------------------
