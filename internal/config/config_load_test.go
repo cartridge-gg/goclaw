@@ -120,6 +120,7 @@ func TestLoad_EnvVarOverrides_InvalidPort(t *testing.T) {
 
 func TestLoad_EnvVarAPIKeys(t *testing.T) {
 	t.Setenv("GOCLAW_ANTHROPIC_API_KEY", "sk-test-key")
+	t.Setenv("OPENAI_API_KEY", "sk-openai-fallback")
 
 	cfg, err := Load("/nonexistent/path")
 	if err != nil {
@@ -127,6 +128,22 @@ func TestLoad_EnvVarAPIKeys(t *testing.T) {
 	}
 	if cfg.Providers.Anthropic.APIKey != "sk-test-key" {
 		t.Fatalf("anthropic key: got %q", cfg.Providers.Anthropic.APIKey)
+	}
+	if cfg.Providers.OpenAI.APIKey != "sk-openai-fallback" {
+		t.Fatalf("openai key fallback: got %q", cfg.Providers.OpenAI.APIKey)
+	}
+}
+
+func TestLoad_GoClawOpenAIKeyOverridesGenericOpenAIKey(t *testing.T) {
+	t.Setenv("GOCLAW_OPENAI_API_KEY", "sk-goclaw-openai")
+	t.Setenv("OPENAI_API_KEY", "sk-generic-openai")
+
+	cfg, err := Load("/nonexistent/path")
+	if err != nil {
+		t.Fatalf("load error: %v", err)
+	}
+	if cfg.Providers.OpenAI.APIKey != "sk-goclaw-openai" {
+		t.Fatalf("openai key: got %q", cfg.Providers.OpenAI.APIKey)
 	}
 }
 

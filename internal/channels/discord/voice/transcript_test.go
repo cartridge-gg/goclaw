@@ -399,6 +399,19 @@ func Test_handleSTTError_quota_opens_circuit(t *testing.T) {
 	}
 }
 
+func Test_handleSTTError_elevenLabsQuotaBodyDoesNotDisableSession(t *testing.T) {
+	tr := newTestTranscriber(&fakeSession{})
+	before := time.Now().UnixNano()
+	tr.handleSTTError(errors.New(`elevenlabs stt: API error 401: {"detail":{"status":"quota_exceeded","message":"This request exceeds your API key quota. You have 0 credits remaining"}}`), utterance{ssrc: 1})
+	if tr.sttDisabled.Load() {
+		t.Fatal("quota_exceeded 401 should not disable session")
+	}
+	got := tr.circuitOpen.Load()
+	if got <= before {
+		t.Fatalf("quota_exceeded 401 did not open circuit: deadline=%d before=%d", got, before)
+	}
+}
+
 func Test_handleSTTError_transient_leaves_state_untouched(t *testing.T) {
 	tr := newTestTranscriber(&fakeSession{})
 	tr.handleSTTError(errors.New("elevenlabs stt: API error 500: server error"), utterance{ssrc: 1})

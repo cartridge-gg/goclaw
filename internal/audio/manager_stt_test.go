@@ -117,6 +117,22 @@ func TestManager_Transcribe_UnknownSkipped(t *testing.T) {
 	}
 }
 
+func TestManager_Transcribe_DefaultChainIncludesOpenAI(t *testing.T) {
+	m := newTestManager()
+	m.RegisterSTT(&mockSTT{
+		name:   "openai",
+		result: &TranscriptResult{Text: "fallback", Provider: "openai"},
+	})
+
+	res, err := m.Transcribe(context.Background(), STTInput{}, STTOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Provider != "openai" {
+		t.Errorf("expected provider 'openai', got %q", res.Provider)
+	}
+}
+
 // Case 6: channel override wins over tenant chain.
 func TestManager_Transcribe_ChannelOverrideWins(t *testing.T) {
 	m := newTestManager()

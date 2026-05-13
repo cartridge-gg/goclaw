@@ -92,6 +92,9 @@ func (c *Config) applyEnvOverrides() {
 	envStr("GOCLAW_ANTHROPIC_API_KEY", &c.Providers.Anthropic.APIKey)
 	envStr("GOCLAW_ANTHROPIC_BASE_URL", &c.Providers.Anthropic.APIBase)
 	envStr("GOCLAW_OPENAI_API_KEY", &c.Providers.OpenAI.APIKey)
+	if c.Providers.OpenAI.APIKey == "" {
+		envStr("OPENAI_API_KEY", &c.Providers.OpenAI.APIKey)
+	}
 	envStr("GOCLAW_OPENAI_BASE_URL", &c.Providers.OpenAI.APIBase)
 	envStr("GOCLAW_OPENROUTER_API_KEY", &c.Providers.OpenRouter.APIKey)
 	if v := os.Getenv("GOCLAW_OPENROUTER_PROVIDER_ORDER"); v != "" {

@@ -7,6 +7,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/audio/elevenlabs"
 	geminiaudio "github.com/nextlevelbuilder/goclaw/internal/audio/gemini"
 	minimaxaudio "github.com/nextlevelbuilder/goclaw/internal/audio/minimax"
+	openaiaudio "github.com/nextlevelbuilder/goclaw/internal/audio/openai"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/memory"
@@ -357,12 +358,26 @@ func setupAudioExtras(cfg *config.Config, mgr *tts.Manager) {
 	// ElevenLabs STT (Scribe v2) — reuse TTS credentials. Registered as tenant-scope
 	// default; per-request tenant override lands via builtin_tools[stt] in Phase 5
 	// channel migration. Legacy per-channel STTProxyURL is bridged separately.
+	sttChain := make([]string, 0, 3)
 	if ellKey != "" {
 		mgr.RegisterSTT(elevenlabs.NewSTTProvider(elevenlabs.Config{
 			APIKey:  ellKey,
 			BaseURL: ellBase,
 		}))
-		mgr.SetSTTChain([]string{"elevenlabs", "proxy"})
+		sttChain = append(sttChain, "elevenlabs")
 		slog.Info("audio.stt: elevenlabs registered")
+	}
+	if key := cfg.Providers.OpenAI.APIKey; key != "" {
+		mgr.RegisterSTT(openaiaudio.NewSTTProvider(openaiaudio.STTConfig{
+			APIKey:    key,
+			APIBase:   cfg.Providers.OpenAI.APIBase,
+			TimeoutMs: cfg.Tts.TimeoutMs,
+		}))
+		sttChain = append(sttChain, "openai")
+		slog.Info("audio.stt: openai registered")
+	}
+	if len(sttChain) > 0 {
+		sttChain = append(sttChain, "proxy")
+		mgr.SetSTTChain(sttChain)
 	}
 }
