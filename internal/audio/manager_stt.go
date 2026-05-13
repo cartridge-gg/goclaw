@@ -11,7 +11,7 @@ import (
 var ErrAllSTTProvidersFailed = errors.New("all STT providers failed")
 
 // defaultSTTChain is the built-in fallback order when no explicit chain is set.
-var defaultSTTChain = []string{"elevenlabs", "proxy"}
+var defaultSTTChain = []string{"elevenlabs", "openai", "proxy"}
 
 // Transcribe tries providers in chain order. Returns first success.
 // Wraps last error with ErrAllSTTProvidersFailed on total failure.
@@ -77,7 +77,7 @@ func (m *Manager) resolveSTTChain(ctx context.Context) []string {
 	if len(m.sttChain) > 0 {
 		return m.sttChain
 	}
-	// (3) Default: elevenlabs → proxy, filtered to what's registered.
+	// (3) Default: elevenlabs -> openai -> proxy, filtered to what's registered.
 	var out []string
 	for _, name := range defaultSTTChain {
 		if _, ok := m.sttProviders[name]; ok {

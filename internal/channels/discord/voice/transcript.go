@@ -33,6 +33,8 @@ const (
 	guildMemberTimeout = 3 * time.Second
 )
 
+const discordSTTLanguage = "en"
+
 // orphanSweepInterval is the cadence for removing tmpfiles left behind by
 // a panicking or crashing worker. 10min of audio is ~1MB of Ogg/Opus, so
 // cleaning anything older than that is a generous upper bound.
@@ -213,6 +215,7 @@ func (t *transcriber) processUtterance(ctx context.Context, u utterance) {
 		Filename: filepath.Base(path),
 	}, audio.STTOptions{
 		Diarize:        false, // we're already speaker-separated via SSRC
+		Language:       discordSTTLanguage,
 		TagAudioEvents: &tagAudioEvents,
 	})
 	if err != nil {
@@ -223,6 +226,14 @@ func (t *transcriber) processUtterance(ctx context.Context, u utterance) {
 		// Scribe occasionally returns empty text for non-speech audio
 		// (music, keyboard noise). Swallow silently at debug level.
 		t.log.Debug("voice: empty transcript", "ssrc", u.ssrc, "duration_ms", u.durationMs)
+		return
+	}
+	if isNonEnglishTranscriptLanguage(result.Language) {
+		t.log.Warn("voice: drop transcript with non-English language detection",
+			"language", result.Language,
+			"ssrc", u.ssrc,
+			"duration_ms", u.durationMs,
+			"chars", len([]rune(result.Text)))
 		return
 	}
 	if decision := assessTranscriptQuality(result.Text, u, result.Duration); decision.Drop {
@@ -241,10 +252,18 @@ func (t *transcriber) processUtterance(ctx context.Context, u utterance) {
 	t.postTranscript(ctx, u, result.Text)
 }
 
+func isNonEnglishTranscriptLanguage(language string) bool {
+	language = strings.ToLower(strings.TrimSpace(language))
+	if language == "" {
+		return false
+	}
+	return language != "eng" && !strings.HasPrefix(language, "en")
+}
+
 // handleSTTError classifies an STT error into transient / quota / auth per
 // the 3-bucket taxonomy agreed in the eng review (issue 2C):
 //   - transient (5xx, network): drop with warn; STT chain has its own retries
-//   - quota (429): open a 60s circuit; drop in-flight utterances until it closes
+//   - quota (429 or provider quota body): open a 60s circuit; drop in-flight utterances until it closes
 //   - auth (401/403): disable STT for the rest of the session; loud log
 //
 // ElevenLabs provider surfaces errors as formatted strings like
@@ -253,22 +272,11 @@ func (t *transcriber) processUtterance(ctx context.Context, u utterance) {
 func (t *transcriber) handleSTTError(err error, u utterance) {
 	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "API error 401"),
-		strings.Contains(msg, "API error 403"),
-		strings.Contains(msg, "API error 402"), // Payment Required — subscription expired
-		strings.Contains(msg, "API error 404"): // typically a deleted model
-		// Permanent per-session failures: auth, payment, missing resource.
-		// Disable STT for the rest of the session rather than burn more
-		// provider calls that will all re-fail. Config reload via pod
-		// restart is required to re-enable.
-		t.sttDisabled.Store(true)
-		t.log.Error("voice: STT permanent failure — disabling for session", "err", err)
-	case strings.Contains(msg, "API error 429"):
+	case isSTTQuotaError(msg):
 		// Quota: open a 60s circuit and drop in-flight work. If a circuit
-		// is already open further into the future (e.g., from rapid 429s
-		// or concurrent workers), keep the later deadline rather than
-		// shortening it — successive 429s during a single outage would
-		// otherwise reset the window each time.
+		// is already open further into the future (e.g., from rapid quota
+		// failures or concurrent workers), keep the later deadline rather
+		// than shortening it.
 		newDeadline := time.Now().Add(60 * time.Second).UnixNano()
 		for {
 			existing := t.circuitOpen.Load()
@@ -279,8 +287,18 @@ func (t *transcriber) handleSTTError(err error, u utterance) {
 				break
 			}
 		}
-		t.log.Warn("voice: STT quota 429 — circuit open 60s",
-			"ssrc", u.ssrc, "duration_ms", u.durationMs)
+		t.log.Warn("voice: STT quota exhausted - circuit open 60s",
+			"ssrc", u.ssrc, "duration_ms", u.durationMs, "err", err)
+	case strings.Contains(msg, "API error 401"),
+		strings.Contains(msg, "API error 403"),
+		strings.Contains(msg, "API error 402"), // Payment Required — subscription expired
+		strings.Contains(msg, "API error 404"): // typically a deleted model
+		// Permanent per-session failures: auth, payment, missing resource.
+		// Disable STT for the rest of the session rather than burn more
+		// provider calls that will all re-fail. Config reload via pod
+		// restart is required to re-enable.
+		t.sttDisabled.Store(true)
+		t.log.Error("voice: STT permanent failure — disabling for session", "err", err)
 	default:
 		// Transient (network/5xx): drop and move on. audio.Manager already
 		// walks the provider chain internally, so by the time we see an
@@ -288,6 +306,15 @@ func (t *transcriber) handleSTTError(err error, u utterance) {
 		t.log.Warn("voice: STT failed (transient); dropping utterance",
 			"err", err, "ssrc", u.ssrc, "duration_ms", u.durationMs)
 	}
+}
+
+func isSTTQuotaError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "api error 429") ||
+		strings.Contains(lower, "quota_exceeded") ||
+		strings.Contains(lower, "quota exceeded") ||
+		strings.Contains(lower, "exceeds your api key") ||
+		strings.Contains(lower, "credits remaining")
 }
 
 // postTranscript sends "<DisplayName>: <text>" through the session's

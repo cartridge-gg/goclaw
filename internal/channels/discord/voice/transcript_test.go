@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/cartridge-gg/discordgo"
+
+	"github.com/nextlevelbuilder/goclaw/internal/audio"
 )
 
 // fakeSession implements discordSession for tests. Hookable methods return
@@ -376,6 +378,34 @@ func newTestTranscriber(fs *fakeSession) *transcriber {
 	}
 }
 
+type recordingSTTProvider struct {
+	name   string
+	result *audio.TranscriptResult
+	opts   audio.STTOptions
+}
+
+func (p *recordingSTTProvider) Name() string { return p.name }
+
+func (p *recordingSTTProvider) Transcribe(_ context.Context, _ audio.STTInput, opts audio.STTOptions) (*audio.TranscriptResult, error) {
+	p.opts = opts
+	return p.result, nil
+}
+
+func testUtterance(frames int) utterance {
+	u := utterance{
+		ssrc:         1,
+		userID:       "u1",
+		opusFrames:   make([][]byte, frames),
+		rtpTimestamp: make([]uint32, frames),
+		durationMs:   frames * opusFrameMs,
+	}
+	for i := 0; i < frames; i++ {
+		u.opusFrames[i] = opusSilenceFrame
+		u.rtpTimestamp[i] = uint32(i * 960)
+	}
+	return u
+}
+
 func Test_handleSTTError_auth_disables_session(t *testing.T) {
 	tr := newTestTranscriber(&fakeSession{})
 	tr.handleSTTError(errors.New("elevenlabs stt: API error 401: unauthorized"), utterance{ssrc: 1})
@@ -399,6 +429,19 @@ func Test_handleSTTError_quota_opens_circuit(t *testing.T) {
 	}
 }
 
+func Test_handleSTTError_elevenLabsQuotaBodyDoesNotDisableSession(t *testing.T) {
+	tr := newTestTranscriber(&fakeSession{})
+	before := time.Now().UnixNano()
+	tr.handleSTTError(errors.New(`elevenlabs stt: API error 401: {"detail":{"status":"quota_exceeded","message":"This request exceeds your API key quota. You have 0 credits remaining"}}`), utterance{ssrc: 1})
+	if tr.sttDisabled.Load() {
+		t.Fatal("quota_exceeded 401 should not disable session")
+	}
+	got := tr.circuitOpen.Load()
+	if got <= before {
+		t.Fatalf("quota_exceeded 401 did not open circuit: deadline=%d before=%d", got, before)
+	}
+}
+
 func Test_handleSTTError_transient_leaves_state_untouched(t *testing.T) {
 	tr := newTestTranscriber(&fakeSession{})
 	tr.handleSTTError(errors.New("elevenlabs stt: API error 500: server error"), utterance{ssrc: 1})
@@ -407,6 +450,75 @@ func Test_handleSTTError_transient_leaves_state_untouched(t *testing.T) {
 	}
 	if tr.circuitOpen.Load() != 0 {
 		t.Fatal("500 should not open quota circuit")
+	}
+}
+
+func Test_processUtterance_forcesEnglishLanguageHint(t *testing.T) {
+	fs := &fakeSession{
+		guildMemberFn: func(_, _ string) (*discordgo.Member, error) {
+			return &discordgo.Member{Nick: "Alice"}, nil
+		},
+	}
+	tr := newTestTranscriber(fs)
+	tr.tmpDir = t.TempDir()
+	tr.audioMgr = audio.NewManager(audio.ManagerConfig{})
+	stt := &recordingSTTProvider{
+		name:   "elevenlabs",
+		result: &audio.TranscriptResult{Text: "hello world", Language: "en", Provider: "elevenlabs"},
+	}
+	tr.audioMgr.RegisterSTT(stt)
+	tr.audioMgr.SetSTTChain([]string{"elevenlabs"})
+	tr.setOutput(&sessionOutput{
+		session:             fs,
+		transcriptChannelID: tr.cfg.TranscriptChannelID,
+		voiceChannelID:      tr.cfg.VoiceChannelID,
+		log:                 discardLogger(),
+		speakers:            make(map[string]string),
+		startedAt:           time.Now(),
+		summaryMsgID:        "summary-1",
+		threadChannelID:     "thread-1",
+	})
+
+	tr.processUtterance(context.Background(), testUtterance(50))
+
+	if stt.opts.Language != discordSTTLanguage {
+		t.Fatalf("STT language = %q, want %q", stt.opts.Language, discordSTTLanguage)
+	}
+	if got := fs.sendsByChannel["thread-1"]; len(got) != 1 {
+		t.Fatalf("expected one transcript post, got %d", len(got))
+	}
+}
+
+func Test_processUtterance_dropsNonEnglishLanguageDetection(t *testing.T) {
+	fs := &fakeSession{
+		guildMemberFn: func(_, _ string) (*discordgo.Member, error) {
+			return &discordgo.Member{Nick: "Alice"}, nil
+		},
+	}
+	tr := newTestTranscriber(fs)
+	tr.tmpDir = t.TempDir()
+	tr.audioMgr = audio.NewManager(audio.ManagerConfig{})
+	stt := &recordingSTTProvider{
+		name:   "elevenlabs",
+		result: &audio.TranscriptResult{Text: "Nah, nao quero nem ler.", Language: "pt", Provider: "elevenlabs"},
+	}
+	tr.audioMgr.RegisterSTT(stt)
+	tr.audioMgr.SetSTTChain([]string{"elevenlabs"})
+	tr.setOutput(&sessionOutput{
+		session:             fs,
+		transcriptChannelID: tr.cfg.TranscriptChannelID,
+		voiceChannelID:      tr.cfg.VoiceChannelID,
+		log:                 discardLogger(),
+		speakers:            make(map[string]string),
+		startedAt:           time.Now(),
+		summaryMsgID:        "summary-1",
+		threadChannelID:     "thread-1",
+	})
+
+	tr.processUtterance(context.Background(), testUtterance(50))
+
+	if got := fs.sendsByChannel["thread-1"]; len(got) != 0 {
+		t.Fatalf("expected non-English transcript to be dropped, got %v", got)
 	}
 }
 
