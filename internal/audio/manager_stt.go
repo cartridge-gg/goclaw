@@ -77,7 +77,7 @@ func (m *Manager) resolveSTTChain(ctx context.Context) []string {
 	if len(m.sttChain) > 0 {
 		return m.sttChain
 	}
-	// (3) Default: elevenlabs → proxy, filtered to what's registered.
+	// (3) Default: elevenlabs -> proxy, filtered to what's registered.
 	var out []string
 	for _, name := range defaultSTTChain {
 		if _, ok := m.sttProviders[name]; ok {
