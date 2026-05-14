@@ -12,11 +12,13 @@ import (
 )
 
 type fakeEmbedAPI struct {
-	called  bool
-	gotCID  string
-	gotData *discordgo.MessageSend
-	result  *discordgo.Message
-	err     error
+	called      bool
+	editCalled  bool
+	gotCID      string
+	gotData     *discordgo.MessageSend
+	gotEditData *discordgo.MessageEdit
+	result      *discordgo.Message
+	err         error
 }
 
 func (f *fakeEmbedAPI) channelMessageSendComplex(_ context.Context, channelID string, data *discordgo.MessageSend) (*discordgo.Message, error) {
@@ -28,6 +30,18 @@ func (f *fakeEmbedAPI) channelMessageSendComplex(_ context.Context, channelID st
 	}
 	if f.result == nil {
 		return &discordgo.Message{ID: "m1", ChannelID: channelID}, nil
+	}
+	return f.result, nil
+}
+
+func (f *fakeEmbedAPI) channelMessageEditComplex(_ context.Context, data *discordgo.MessageEdit) (*discordgo.Message, error) {
+	f.editCalled = true
+	f.gotEditData = data
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.result == nil {
+		return &discordgo.Message{ID: data.ID, ChannelID: data.Channel}, nil
 	}
 	return f.result, nil
 }
@@ -220,6 +234,49 @@ func TestSendEmbed_FullConversion(t *testing.T) {
 	}
 	if len(got.Fields) != 2 || got.Fields[0].Name != "env" || !got.Fields[0].Inline {
 		t.Errorf("fields not copied: %+v", got.Fields)
+	}
+}
+
+func TestSendEmbed_EditsExistingMessage(t *testing.T) {
+	f := &fakeEmbedAPI{}
+	res, err := sendEmbed(context.Background(), f, channels.DiscordSendEmbedParams{
+		ChannelID: "c1",
+		MessageID: "m-existing",
+		Content:   "",
+		Embeds:    []channels.DiscordEmbed{{Title: "Processing", Description: "Button click received.", Color: 0xF1C40F}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if f.called {
+		t.Fatal("send API should not be called in edit mode")
+	}
+	if !f.editCalled {
+		t.Fatal("edit API was not called")
+	}
+	if res.MessageID != "m-existing" || res.ChannelID != "c1" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if f.gotEditData == nil || f.gotEditData.ID != "m-existing" || f.gotEditData.Channel != "c1" {
+		t.Fatalf("edit target not set correctly: %+v", f.gotEditData)
+	}
+	if f.gotEditData.Embeds == nil || len(*f.gotEditData.Embeds) != 1 {
+		t.Fatalf("edit embeds not set: %+v", f.gotEditData.Embeds)
+	}
+	if f.gotEditData.Components == nil || len(*f.gotEditData.Components) != 0 {
+		t.Fatalf("edit without components should clear buttons, got %+v", f.gotEditData.Components)
+	}
+}
+
+func TestSendEmbed_EditRejectsReplyTo(t *testing.T) {
+	_, err := sendEmbed(context.Background(), &fakeEmbedAPI{}, channels.DiscordSendEmbedParams{
+		ChannelID: "c1",
+		MessageID: "m1",
+		ReplyTo:   "m0",
+		Embeds:    []channels.DiscordEmbed{basicEmbed()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "reply_to cannot be used") {
+		t.Fatalf("expected reply_to edit error, got %v", err)
 	}
 }
 

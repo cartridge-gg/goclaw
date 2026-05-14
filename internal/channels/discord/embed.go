@@ -34,12 +34,17 @@ const (
 // implementation (sessionEmbedAPI) wraps c.session directly.
 type embedAPI interface {
 	channelMessageSendComplex(ctx context.Context, channelID string, data *discordgo.MessageSend) (*discordgo.Message, error)
+	channelMessageEditComplex(ctx context.Context, data *discordgo.MessageEdit) (*discordgo.Message, error)
 }
 
 type sessionEmbedAPI struct{ s *discordgo.Session }
 
 func (a sessionEmbedAPI) channelMessageSendComplex(ctx context.Context, channelID string, data *discordgo.MessageSend) (*discordgo.Message, error) {
 	return a.s.ChannelMessageSendComplex(channelID, data, discordgo.WithContext(ctx))
+}
+
+func (a sessionEmbedAPI) channelMessageEditComplex(ctx context.Context, data *discordgo.MessageEdit) (*discordgo.Message, error) {
+	return a.s.ChannelMessageEditComplex(data, discordgo.WithContext(ctx))
 }
 
 // SendEmbed sends one or more Discord rich embeds (optionally with accompanying
@@ -80,28 +85,29 @@ func sendEmbed(ctx context.Context, api embedAPI, params channels.DiscordSendEmb
 		embeds = append(embeds, e)
 	}
 
-	send := &discordgo.MessageSend{
-		Content: params.Content,
-		Embeds:  embeds,
+	if params.MessageID != "" && params.ReplyTo != "" {
+		return channels.DiscordSendEmbedResult{}, errors.New("reply_to cannot be used when editing an existing message")
 	}
-	if params.ReplyTo != "" {
-		send.Reference = &discordgo.MessageReference{
-			MessageID: params.ReplyTo,
-			ChannelID: params.ChannelID,
-		}
-	}
+
+	components := make([]discordgo.MessageComponent, 0)
 	if len(params.Components) > 0 {
-		components, err := convertComponents(params.Components)
+		var err error
+		components, err = convertComponents(params.Components)
 		if err != nil {
 			return channels.DiscordSendEmbedResult{}, err
 		}
-		send.Components = components
 	}
 
 	if len(params.Components) > 0 {
 		rows, buttons, customIDs := summarizeComponents(params.Components)
-		slog.Info("discord: sending embed with components",
+		operation := "send"
+		if params.MessageID != "" {
+			operation = "edit"
+		}
+		slog.Info("discord: embed with components",
+			"operation", operation,
 			"channel_id", params.ChannelID,
+			"message_id", params.MessageID,
 			"reply_to", params.ReplyTo,
 			"embed_count", len(params.Embeds),
 			"component_rows", rows,
@@ -109,7 +115,30 @@ func sendEmbed(ctx context.Context, api embedAPI, params channels.DiscordSendEmb
 			"component_custom_ids", customIDs)
 	}
 
-	msg, err := api.channelMessageSendComplex(ctx, params.ChannelID, send)
+	var (
+		msg *discordgo.Message
+		err error
+	)
+	if params.MessageID != "" {
+		edit := discordgo.NewMessageEdit(params.ChannelID, params.MessageID)
+		edit.Content = &params.Content
+		edit.Embeds = &embeds
+		edit.Components = &components
+		msg, err = api.channelMessageEditComplex(ctx, edit)
+	} else {
+		send := &discordgo.MessageSend{
+			Content:    params.Content,
+			Embeds:     embeds,
+			Components: components,
+		}
+		if params.ReplyTo != "" {
+			send.Reference = &discordgo.MessageReference{
+				MessageID: params.ReplyTo,
+				ChannelID: params.ChannelID,
+			}
+		}
+		msg, err = api.channelMessageSendComplex(ctx, params.ChannelID, send)
+	}
 	if err != nil {
 		return channels.DiscordSendEmbedResult{}, fmt.Errorf("discord API: %w", err)
 	}

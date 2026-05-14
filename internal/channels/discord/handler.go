@@ -14,7 +14,6 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/media"
-	"github.com/nextlevelbuilder/goclaw/internal/channels/typing"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
@@ -234,19 +233,7 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 	if suppressPlaceholder {
 		typingTTL = suppressedPlaceholderTypingTTL
 	}
-	typingCtrl := typing.New(typing.Options{
-		MaxDuration:       typingTTL,
-		KeepaliveInterval: 9 * time.Second,
-		StartFn: func() error {
-			return c.session.ChannelTyping(channelID)
-		},
-	})
-	// Stop previous typing controller for this channel (if any)
-	if prev, ok := c.typingCtrls.Load(channelID); ok {
-		prev.(*typing.Controller).Stop()
-	}
-	c.typingCtrls.Store(channelID, typingCtrl)
-	typingCtrl.Start()
+	c.startTyping(channelID, typingTTL)
 
 	// Send placeholder "Thinking..." message unless suppressed via config.
 	// When suppressed, the typing indicator alone signals progress until the

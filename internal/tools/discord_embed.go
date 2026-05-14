@@ -49,7 +49,7 @@ func (t *SendDiscordEmbedTool) Name() string { return "send_discord_embed" }
 func (t *SendDiscordEmbedTool) RequiredChannelTypes() []string { return []string{"discord"} }
 
 func (t *SendDiscordEmbedTool) Description() string {
-	return "Post a Discord rich embed (or up to 10 embeds) on a Discord channel or thread. " +
+	return "Post or update a Discord rich embed (or up to 10 embeds) on a Discord channel or thread. " +
 		"Use embeds when you have STRUCTURED content that benefits from visual formatting: " +
 		"status cards, search results, leaderboards, release notes, error reports, key-value " +
 		"summaries, or anything with sections/fields. For a plain text reply, just return the " +
@@ -63,7 +63,8 @@ func (t *SendDiscordEmbedTool) Description() string {
 		"\n  * Alert: author (name + icon) + description + timestamp + footer for source." +
 		"\n\n" +
 		"Defaults: targets the current Discord channel from context — set `channel_id` only " +
-		"to post elsewhere (e.g. a thread returned by create_discord_thread). " +
+		"to post elsewhere (e.g. a thread returned by create_discord_thread). Set `message_id` " +
+		"to edit an existing bot message, typically the `component_parent_message` from a button wake. " +
 		"Limits: 10 embeds per call, 25 fields per embed, 6000 total chars across all embed " +
 		"text, 2000 chars for `content`."
 }
@@ -220,6 +221,10 @@ func (t *SendDiscordEmbedTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Optional plain text shown above the embeds. 2000 char limit. Omit for embed-only messages.",
 			},
+			"message_id": map[string]any{
+				"type":        "string",
+				"description": "Optional existing Discord message ID to edit instead of sending a new message. Use this with trusted component_parent_message metadata to update an approval/status card after a button click. When set, reply_to is not allowed and omitted components clear existing buttons.",
+			},
 			"reply_to": map[string]any{
 				"type":        "string",
 				"description": "Optional message ID to reply to. Creates a Discord inline reply pointing at that message.",
@@ -301,6 +306,7 @@ func (t *SendDiscordEmbedTool) Execute(ctx context.Context, args map[string]any)
 
 	params := channels.DiscordSendEmbedParams{
 		ChannelID:  channelID,
+		MessageID:  argString(args, "message_id"),
 		Content:    argString(args, "content"),
 		ReplyTo:    argString(args, "reply_to"),
 		Embeds:     embeds,

@@ -589,6 +589,8 @@ func (c *Channel) handleComponentInteraction(i *discordgo.InteractionCreate) {
 		return
 	}
 
+	c.startTyping(channelID, defaultTypingTTL)
+
 	metadata := buildComponentInteractionMetadata(i.ID, invoker, invokerTag, i.GuildID, channelID, isDM, data.CustomID, i.Message)
 
 	if cc := c.ContactCollector(); cc != nil {

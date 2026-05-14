@@ -52,7 +52,7 @@ func TestSendDiscordEmbed_RequiresEmbeds(t *testing.T) {
 	tool.SetDiscordEmbedSender(f.fn)
 
 	for _, args := range []map[string]any{
-		{}, // missing
+		{},                  // missing
 		{"embeds": []any{}}, // empty
 	} {
 		res := tool.Execute(embedCtx(), args)
@@ -105,8 +105,8 @@ func TestSendDiscordEmbed_FullDecode(t *testing.T) {
 
 	res := tool.Execute(embedCtx(), map[string]any{
 		"channel_id": "2222",
+		"message_id": "m-edit",
 		"content":    "heads up",
-		"reply_to":   "m0",
 		"embeds": []any{
 			map[string]any{
 				"title":       "Status",
@@ -129,7 +129,7 @@ func TestSendDiscordEmbed_FullDecode(t *testing.T) {
 		t.Fatalf("expected success, got %+v", res)
 	}
 	p := f.gotParam
-	if p.ChannelID != "2222" || p.Content != "heads up" || p.ReplyTo != "m0" {
+	if p.ChannelID != "2222" || p.MessageID != "m-edit" || p.Content != "heads up" {
 		t.Errorf("top-level params wrong: %+v", p)
 	}
 	if len(p.Embeds) != 1 {
