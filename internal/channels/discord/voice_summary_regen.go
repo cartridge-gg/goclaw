@@ -77,7 +77,7 @@ func isVoiceSummaryRegenerationRequest(content string) bool {
 		return false
 	}
 	if strings.Contains(s, "summary") || strings.Contains(s, "summar") {
-		for _, verb := range []string{"regenerate", "regen", "rerun", "re run", "refresh", "backfill", "redo", "rebuild"} {
+		for _, verb := range []string{"regenerate", "regen", "rerun", "re run", "refresh", "backfill", "redo", "rebuild", "summarize", "summarise"} {
 			if strings.Contains(s, verb) {
 				return true
 			}

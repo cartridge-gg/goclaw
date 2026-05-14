@@ -3,6 +3,7 @@ package voice
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -190,22 +191,94 @@ func Test_newSessionOutput_ignores_stale_active_summary_when_recovering(t *testi
 	}
 }
 
-func Test_newSessionOutput_ignores_ended_summary_when_recovering(t *testing.T) {
+func Test_newSessionOutput_recovers_recently_ended_summary_when_thread_is_hot(t *testing.T) {
+	now := time.Now()
+	var threadMessages []*discordgo.Message
+	for i := 0; i < 150; i++ {
+		threadMessages = append(threadMessages, &discordgo.Message{
+			ID:        fmt.Sprintf("m-%03d", i),
+			Content:   fmt.Sprintf("Alice: line %03d", i),
+			Timestamp: now.Add(time.Duration(i-149) * time.Second),
+		})
+	}
 	fs := &fakeSession{
-		channelMessagesFn: func(channelID string, _ int, _, _, _ string) ([]*discordgo.Message, error) {
-			if channelID != "transcript-ch" {
+		channelMessagesFn: func(channelID string, limit int, beforeID, _, _ string) ([]*discordgo.Message, error) {
+			switch channelID {
+			case "transcript-ch":
+				return []*discordgo.Message{{
+					ID:        "summary-ended",
+					Content:   "✅ Voice session ended in #test-channel — 36m · 5 speakers · 316 utterances",
+					Timestamp: now.Add(-40 * time.Minute),
+					Thread:    &discordgo.Channel{ID: "thread-ended"},
+				}}, nil
+			case "thread-ended":
+				// Discord returns messages newest-first. Page one is the newest
+				// 100 messages, then beforeID=m-050 returns the older 50.
+				var page []*discordgo.Message
+				switch beforeID {
+				case "":
+					for i := len(threadMessages) - 1; i >= 50 && len(page) < limit; i-- {
+						page = append(page, threadMessages[i])
+					}
+				case "m-050":
+					for i := 49; i >= 0 && len(page) < limit; i-- {
+						page = append(page, threadMessages[i])
+					}
+				}
+				return page, nil
+			default:
 				return nil, nil
 			}
-			return []*discordgo.Message{{
-				ID:      "summary-ended",
-				Content: "Discussed shipping.\n\n✅ Voice session ended in #test-channel — 5m · 2 speakers · 8 utterances",
-				Thread:  &discordgo.Channel{ID: "thread-ended"},
-			}}, nil
+		},
+	}
+	var seenTranscript string
+	summarizer := func(_ context.Context, transcript string, _ channels.VoiceTranscriptSummaryMeta) (string, error) {
+		seenTranscript = transcript
+		return "Recovered summary.", nil
+	}
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), summarizer)
+	if fs.channelSendCalls != 0 || fs.threadStartCalls != 0 {
+		t.Fatalf("recovery should not create a new summary/thread, sends=%d threads=%d", fs.channelSendCalls, fs.threadStartCalls)
+	}
+	if out.summaryMsgID != "summary-ended" || out.threadChannelID != "thread-ended" {
+		t.Fatalf("did not recover recently-ended summary/thread: summary=%q thread=%q", out.summaryMsgID, out.threadChannelID)
+	}
+	if out.utteranceCount != 150 {
+		t.Fatalf("expected all paged transcript lines to recover, got %d", out.utteranceCount)
+	}
+	out.Close(context.Background(), time.Minute)
+	first := strings.Index(seenTranscript, "Alice: line 000")
+	last := strings.Index(seenTranscript, "Alice: line 149")
+	if first < 0 || last < 0 || first > last {
+		t.Fatalf("recovered transcript should be chronological and complete, got first=%d last=%d transcript=%q", first, last, seenTranscript)
+	}
+	if !strings.Contains(fs.lastEditContent, "Recovered summary.") {
+		t.Fatalf("final edit should replace stale footer with regenerated summary: %q", fs.lastEditContent)
+	}
+}
+
+func Test_newSessionOutput_ignores_stale_ended_summary_when_recovering(t *testing.T) {
+	stale := time.Now().Add(-12 * time.Hour)
+	fs := &fakeSession{
+		channelMessagesFn: func(channelID string, _ int, _, _, _ string) ([]*discordgo.Message, error) {
+			switch channelID {
+			case "transcript-ch":
+				return []*discordgo.Message{{
+					ID:        "summary-ended",
+					Content:   "Discussed shipping.\n\n✅ Voice session ended in #test-channel — 5m · 2 speakers · 8 utterances",
+					Timestamp: stale,
+					Thread:    &discordgo.Channel{ID: "thread-ended"},
+				}}, nil
+			case "thread-ended":
+				return []*discordgo.Message{{Content: "Alice: stale line", Timestamp: stale}}, nil
+			default:
+				return nil, nil
+			}
 		},
 	}
 	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
 	if out.summaryMsgID == "summary-ended" {
-		t.Fatal("must not recover an already-ended voice summary")
+		t.Fatal("must not recover a stale ended voice summary")
 	}
 	if fs.channelSendCalls != 1 || fs.threadStartCalls != 1 {
 		t.Fatalf("expected fresh summary/thread after ignoring ended summary, sends=%d threads=%d", fs.channelSendCalls, fs.threadStartCalls)

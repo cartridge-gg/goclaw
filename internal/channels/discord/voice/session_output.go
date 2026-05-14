@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,9 +29,9 @@ const (
 
 	// On process restart we do not have in-memory sessionOutput state. Before
 	// creating a fresh summary/thread, look back through recent transcript
-	// channel messages for an un-ended voice summary for the same voice channel.
+	// channel messages for a recent voice summary for the same voice channel.
 	sessionRecoveryMessageScanLimit = 25
-	sessionRecoveryThreadLineLimit  = 100
+	sessionRecoveryThreadLineLimit  = 1000
 	sessionRecoveryMaxTranscriptAge = 2 * time.Minute
 	summaryMessageMaxLen            = 1900
 
@@ -44,7 +45,7 @@ const (
 )
 
 var (
-	transcriptSummaryTimeout = 30 * time.Second
+	transcriptSummaryTimeout = 90 * time.Second
 	finalSummaryEditTimeout  = 10 * time.Second
 )
 
@@ -154,10 +155,11 @@ func newSessionOutput(ctx context.Context, session discordSession, transcriptChI
 	return out
 }
 
-// recoverActive reattaches to the most recent un-ended voice summary for this
-// channel. This covers pod restarts while humans are still in voice: the new
-// process rejoins but continues the existing transcript thread instead of
-// creating a duplicate summary message.
+// recoverActive reattaches to the most recent voice summary for this channel
+// when its transcript thread is still hot. This covers pod restarts and
+// transient voice disconnects while humans are still in voice: the new process
+// rejoins but continues the existing transcript thread instead of creating a
+// duplicate summary message.
 func (o *sessionOutput) recoverActive(ctx context.Context) bool {
 	msgs, err := o.session.ChannelMessages(o.transcriptChannelID, sessionRecoveryMessageScanLimit, "", "", "", discordgo.WithContext(ctx))
 	if err != nil {
@@ -208,11 +210,9 @@ func (o *sessionOutput) recoverActive(ctx context.Context) bool {
 
 func (o *sessionOutput) isRecoverableSummary(content string) bool {
 	label := o.channelLabel()
-	if strings.Contains(content, fmt.Sprintf("✅ Voice session ended in %s", label)) {
-		return false
-	}
 	return strings.Contains(content, fmt.Sprintf("🎤 Voice session started in %s", label)) ||
-		strings.Contains(content, fmt.Sprintf("🎤 Voice session in %s", label))
+		strings.Contains(content, fmt.Sprintf("🎤 Voice session in %s", label)) ||
+		strings.Contains(content, fmt.Sprintf("✅ Voice session ended in %s", label))
 }
 
 type recoveredTranscript struct {
@@ -224,14 +224,38 @@ func (o *sessionOutput) loadRecoveredTranscript(ctx context.Context, threadChann
 	if threadChannelID == "" {
 		return recoveredTranscript{}
 	}
-	msgs, err := o.session.ChannelMessages(threadChannelID, sessionRecoveryThreadLineLimit, "", "", "", discordgo.WithContext(ctx))
-	if err != nil {
-		o.log.Debug("voice: recovered thread transcript scan failed", "err", err, "thread_channel_id", threadChannelID)
-		return recoveredTranscript{}
+	var all []*discordgo.Message
+	beforeID := ""
+	for len(all) < sessionRecoveryThreadLineLimit {
+		limit := 100
+		if remaining := sessionRecoveryThreadLineLimit - len(all); remaining < limit {
+			limit = remaining
+		}
+		msgs, err := o.session.ChannelMessages(threadChannelID, limit, beforeID, "", "", discordgo.WithContext(ctx))
+		if err != nil {
+			o.log.Debug("voice: recovered thread transcript scan failed", "err", err, "thread_channel_id", threadChannelID)
+			return recoveredTranscript{}
+		}
+		if len(msgs) == 0 {
+			break
+		}
+		all = append(all, msgs...)
+		beforeID = msgs[len(msgs)-1].ID
+		if len(msgs) < limit {
+			break
+		}
 	}
-	recovered := recoveredTranscript{lines: make([]string, 0, len(msgs))}
-	for i := len(msgs) - 1; i >= 0; i-- {
-		msg := msgs[i]
+	sort.Slice(all, func(i, j int) bool {
+		if all[i] == nil {
+			return false
+		}
+		if all[j] == nil {
+			return true
+		}
+		return all[i].Timestamp.Before(all[j].Timestamp)
+	})
+	recovered := recoveredTranscript{lines: make([]string, 0, len(all))}
+	for _, msg := range all {
 		if msg == nil {
 			continue
 		}
