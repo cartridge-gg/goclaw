@@ -599,6 +599,27 @@ func (c *Channel) currentTypingCtrl(channelID string) *typing.Controller {
 	return typed
 }
 
+func (c *Channel) startTyping(channelID string, ttl time.Duration) *typing.Controller {
+	if channelID == "" {
+		return nil
+	}
+	ctrl := typing.New(typing.Options{
+		MaxDuration:       ttl,
+		KeepaliveInterval: 9 * time.Second,
+		StartFn: func() error {
+			return c.session.ChannelTyping(channelID)
+		},
+	})
+	if prev, ok := c.typingCtrls.Load(channelID); ok {
+		if typed, ok := prev.(*typing.Controller); ok {
+			typed.Stop()
+		}
+	}
+	c.typingCtrls.Store(channelID, ctrl)
+	ctrl.Start()
+	return ctrl
+}
+
 func (c *Channel) finishTyping(channelID string, expected *typing.Controller, sendErr error) {
 	if expected == nil {
 		return

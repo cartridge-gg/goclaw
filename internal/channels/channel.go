@@ -719,6 +719,7 @@ type DiscordEmbedField struct {
 // the inbound prompt; link buttons open a URL without a callback.
 type DiscordSendEmbedParams struct {
 	ChannelID  string                    // target channel (or thread) ID
+	MessageID  string                    // optional existing message ID to edit instead of sending a new message
 	Content    string                    // optional plain text shown above the embeds (2000 char limit)
 	Embeds     []DiscordEmbed            // 1-10 embeds
 	ReplyTo    string                    // optional message ID to reply to
