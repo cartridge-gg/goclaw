@@ -88,6 +88,31 @@ func TestBuildVoiceTranscriptSummarizer_BasicCall(t *testing.T) {
 	}
 }
 
+func TestBuildVoiceTranscriptSummarizer_InjectsSessionMetadata(t *testing.T) {
+	p := &stubProvider{resp: &providers.ChatResponse{Content: "ok"}}
+	fn := BuildVoiceTranscriptSummarizer(&VoiceTranscriptSummarizerConfig{
+		Provider: p,
+		Model:    "stub-model",
+	})
+	_, err := fn(context.Background(), "alice: hi\nbob: hey", VoiceTranscriptSummaryMeta{
+		Duration:       37 * time.Minute,
+		UtteranceCount: 120,
+		Speakers: []VoiceTranscriptSpeaker{
+			{DisplayName: "alice"},
+			{DisplayName: "bob"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	got := p.lastReq.Messages[0].Content
+	for _, want := range []string{"Session metadata", "duration: 37m0s", "utterances: 120", "speakers: alice, bob"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("metadata prompt missing %q: %q", want, got)
+		}
+	}
+}
+
 func TestBuildVoiceTranscriptSummarizer_SkillBodyOverridesPrompt(t *testing.T) {
 	p := &stubProvider{resp: &providers.ChatResponse{Content: "ok"}}
 	fn := BuildVoiceTranscriptSummarizer(&VoiceTranscriptSummarizerConfig{

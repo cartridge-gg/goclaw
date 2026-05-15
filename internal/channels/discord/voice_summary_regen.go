@@ -160,9 +160,26 @@ func (c *Channel) regenerateVoiceSummaryFromThread(ctx context.Context, thread *
 	}
 	stats := voiceFinalStatsLine(voiceName, meta.Duration, len(speakers), meta.UtteranceCount)
 	finalText := stats
+	var finalEmbeds []*discordgo.MessageEmbed
 	if strings.TrimSpace(summary) != "" {
-		discordSummary := voice.FormatSummaryForDiscord(summary, speakers)
-		finalText = voice.CombineSummaryAndStats(discordSummary, stats)
+		rendered := voice.RenderFinalSummaryForDiscord(summary, stats, speakers)
+		finalText = rendered.FallbackContent
+		finalEmbeds = rendered.Embeds
+		if len(finalEmbeds) > 0 {
+			finalText = rendered.Content
+		}
+	}
+	if len(finalEmbeds) > 0 {
+		edit := discordgo.NewMessageEdit(thread.ParentID, parent.ID)
+		edit.SetContent(finalText)
+		edit.SetEmbeds(finalEmbeds)
+		if _, err := c.session.ChannelMessageEditComplex(edit, discordgo.WithContext(ctx)); err == nil {
+			c.editVoiceSummaryRegenerationAck(ctx, thread.ID, ackID, "Voice summary regenerated.")
+			return nil
+		} else {
+			slog.Warn("discord: voice summary embed edit failed; falling back to plain text", "err", err, "thread_id", thread.ID)
+			finalText = voice.CombineSummaryAndStats(voice.FormatSummaryForDiscord(summary, speakers), stats)
+		}
 	}
 	if _, err := c.session.ChannelMessageEdit(thread.ParentID, parent.ID, finalText, discordgo.WithContext(ctx)); err != nil {
 		return fmt.Errorf("edit parent summary: %w", err)

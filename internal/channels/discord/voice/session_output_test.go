@@ -450,6 +450,42 @@ func Test_Close_formats_summary_for_discord(t *testing.T) {
 	}
 }
 
+func Test_RenderFinalSummaryForDiscord_splits_action_items_into_embeds(t *testing.T) {
+	stats := "✅ Voice session ended in #chill — 35m · 2 speakers · 120 utterances"
+	summary := strings.Join([]string{
+		"[[Controller]] launch scope tightened around the account flow.",
+		"",
+		"Action items:",
+		"- alice: mock the iOS onboarding variant.",
+		"- Unassigned: decide whether PvP stays in MVP.",
+	}, "\n")
+	got := RenderFinalSummaryForDiscord(summary, stats, []channels.VoiceTranscriptSpeaker{
+		{UserID: "111111", DisplayName: "alice"},
+	})
+
+	if got.Content != stats {
+		t.Fatalf("content = %q, want stats line", got.Content)
+	}
+	if len(got.Embeds) != 2 {
+		t.Fatalf("embeds len = %d, want summary + tasks", len(got.Embeds))
+	}
+	if got.Embeds[0].Title != "Session summary" || !strings.Contains(got.Embeds[0].Description, "Controller launch scope") {
+		t.Fatalf("summary embed not populated: %+v", got.Embeds[0])
+	}
+	if strings.Contains(got.Embeds[0].Description, "Action items") {
+		t.Fatalf("summary embed should not duplicate action section: %q", got.Embeds[0].Description)
+	}
+	if got.Embeds[1].Title != "Proposed tasks" || len(got.Embeds[1].Fields) != 2 {
+		t.Fatalf("task embed not populated: %+v", got.Embeds[1])
+	}
+	if got.Embeds[1].Fields[0].Name != "<@111111>" {
+		t.Fatalf("owner should be converted to mention, got %q", got.Embeds[1].Fields[0].Name)
+	}
+	if !strings.Contains(got.FallbackContent, "Action items") {
+		t.Fatalf("plain fallback should retain action items: %q", got.FallbackContent)
+	}
+}
+
 // Summarizer returning an error → fall back to the legacy stats line.
 func Test_Close_summarizer_error_falls_back_to_stats(t *testing.T) {
 	fs := &fakeSession{}
