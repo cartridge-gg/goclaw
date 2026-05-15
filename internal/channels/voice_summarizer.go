@@ -17,22 +17,26 @@ import (
 )
 
 // defaultVoiceSummaryPrompt is the fallback system prompt when no
-// skill body is configured on the summarizer. Keeps output short and
-// Discord-friendly. Project-agnostic — references no specific people
-// or products.
+// skill body is configured on the summarizer. It asks for a summary
+// whose depth scales with the session length while staying Discord-
+// friendly. Project-agnostic — references no specific people or
+// products.
 const defaultVoiceSummaryPrompt = `You are summarizing a Discord voice channel conversation for a transcript channel.
 
-The user will provide a transcript with each line in the form "<speaker name>: <what they said>". Your job is to produce a tight summary suitable for a Discord channel message: 2-4 short paragraphs OR a 3-6 bullet list, whichever fits the conversation better.
+The user will provide session metadata and a transcript with each line in the form "<speaker name>: <what they said>". Your job is to produce a useful summary suitable for a Discord channel message and an Obsidian memory note.
 
 Guidelines:
-- Lead with the topic or decision, not generic preamble.
+- Scale detail to the call: short/content-light calls can be 2-4 bullets or paragraphs; 10-30 minute calls should usually be 4-8 bullets or paragraphs; 30+ minute calls should usually be 8-14 bullets or paragraphs with meaningful decisions, tradeoffs, and unresolved questions.
+- Lead with the topic, decision, or outcome, not generic preamble.
 - Mention speakers by name when attribution matters; omit names for filler.
 - Quote at most one short, distinctive line if it's load-bearing.
+- Capture concrete tasks, owners, assignments, follow-ups, and proposed next steps.
+- If tasks were discussed, end with a section headed exactly "Action items:" and format each task as "- Owner: task". Use the exact transcript speaker name as Owner when assigned; use "Unassigned" when no owner is clear. Keep uncertainty in the task text instead of inventing ownership.
 - Skip filler ("uh", "you know"), greetings, and side-channel chatter.
 - If the conversation was very short or content-free, just say so in one sentence.
 - Use plain text — no Markdown headings; small inline emphasis is fine.
 
-Stay under 1500 characters total.`
+Stay under 3500 characters total.`
 
 // voiceSummaryNoToolGuard is appended even when a custom skill body replaces
 // the default prompt. Voice summaries call the provider directly, outside the
@@ -90,6 +94,9 @@ func BuildVoiceTranscriptSummarizer(cfg *VoiceTranscriptSummarizerConfig) func(c
 
 		augmented := systemPrompt
 		augmented = augmented + "\n\n" + voiceSummaryNoToolGuard
+		if metaBlock := voiceSummaryMetadataBlock(meta); metaBlock != "" {
+			augmented = augmented + "\n\n" + metaBlock
+		}
 		if cfg.MemoryStore != nil && cfg.MemoryAgentID != "" {
 			if ctxBlob := buildMemoryContext(ctx, cfg, t); ctxBlob != "" {
 				augmented = augmented + memoryContextHeader + "\n" + ctxBlob
@@ -146,6 +153,37 @@ func BuildVoiceTranscriptSummarizer(cfg *VoiceTranscriptSummarizerConfig) func(c
 
 		return summary, nil
 	}
+}
+
+func voiceSummaryMetadataBlock(meta VoiceTranscriptSummaryMeta) string {
+	var b strings.Builder
+	b.WriteString("--- Session metadata ---\n")
+	wrote := false
+	if meta.Duration > 0 {
+		fmt.Fprintf(&b, "duration: %s\n", meta.Duration.Round(time.Second))
+		wrote = true
+	}
+	if meta.UtteranceCount > 0 {
+		fmt.Fprintf(&b, "utterances: %d\n", meta.UtteranceCount)
+		wrote = true
+	}
+	if len(meta.Speakers) > 0 {
+		names := make([]string, 0, len(meta.Speakers))
+		for _, speaker := range meta.Speakers {
+			name := strings.TrimSpace(speaker.DisplayName)
+			if name != "" {
+				names = append(names, name)
+			}
+		}
+		if len(names) > 0 {
+			fmt.Fprintf(&b, "speakers: %s\n", strings.Join(names, ", "))
+			wrote = true
+		}
+	}
+	if !wrote {
+		return ""
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func responseHasToolCalls(resp *providers.ChatResponse) bool {

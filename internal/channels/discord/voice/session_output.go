@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,9 +29,9 @@ const (
 
 	// On process restart we do not have in-memory sessionOutput state. Before
 	// creating a fresh summary/thread, look back through recent transcript
-	// channel messages for an un-ended voice summary for the same voice channel.
+	// channel messages for a recent voice summary for the same voice channel.
 	sessionRecoveryMessageScanLimit = 25
-	sessionRecoveryThreadLineLimit  = 100
+	sessionRecoveryThreadLineLimit  = 1000
 	sessionRecoveryMaxTranscriptAge = 2 * time.Minute
 	summaryMessageMaxLen            = 1900
 
@@ -44,7 +45,7 @@ const (
 )
 
 var (
-	transcriptSummaryTimeout = 30 * time.Second
+	transcriptSummaryTimeout = 90 * time.Second
 	finalSummaryEditTimeout  = 10 * time.Second
 )
 
@@ -154,10 +155,11 @@ func newSessionOutput(ctx context.Context, session discordSession, transcriptChI
 	return out
 }
 
-// recoverActive reattaches to the most recent un-ended voice summary for this
-// channel. This covers pod restarts while humans are still in voice: the new
-// process rejoins but continues the existing transcript thread instead of
-// creating a duplicate summary message.
+// recoverActive reattaches to the most recent voice summary for this channel
+// when its transcript thread is still hot. This covers pod restarts and
+// transient voice disconnects while humans are still in voice: the new process
+// rejoins but continues the existing transcript thread instead of creating a
+// duplicate summary message.
 func (o *sessionOutput) recoverActive(ctx context.Context) bool {
 	msgs, err := o.session.ChannelMessages(o.transcriptChannelID, sessionRecoveryMessageScanLimit, "", "", "", discordgo.WithContext(ctx))
 	if err != nil {
@@ -208,11 +210,9 @@ func (o *sessionOutput) recoverActive(ctx context.Context) bool {
 
 func (o *sessionOutput) isRecoverableSummary(content string) bool {
 	label := o.channelLabel()
-	if strings.Contains(content, fmt.Sprintf("✅ Voice session ended in %s", label)) {
-		return false
-	}
 	return strings.Contains(content, fmt.Sprintf("🎤 Voice session started in %s", label)) ||
-		strings.Contains(content, fmt.Sprintf("🎤 Voice session in %s", label))
+		strings.Contains(content, fmt.Sprintf("🎤 Voice session in %s", label)) ||
+		strings.Contains(content, fmt.Sprintf("✅ Voice session ended in %s", label))
 }
 
 type recoveredTranscript struct {
@@ -224,14 +224,38 @@ func (o *sessionOutput) loadRecoveredTranscript(ctx context.Context, threadChann
 	if threadChannelID == "" {
 		return recoveredTranscript{}
 	}
-	msgs, err := o.session.ChannelMessages(threadChannelID, sessionRecoveryThreadLineLimit, "", "", "", discordgo.WithContext(ctx))
-	if err != nil {
-		o.log.Debug("voice: recovered thread transcript scan failed", "err", err, "thread_channel_id", threadChannelID)
-		return recoveredTranscript{}
+	var all []*discordgo.Message
+	beforeID := ""
+	for len(all) < sessionRecoveryThreadLineLimit {
+		limit := 100
+		if remaining := sessionRecoveryThreadLineLimit - len(all); remaining < limit {
+			limit = remaining
+		}
+		msgs, err := o.session.ChannelMessages(threadChannelID, limit, beforeID, "", "", discordgo.WithContext(ctx))
+		if err != nil {
+			o.log.Debug("voice: recovered thread transcript scan failed", "err", err, "thread_channel_id", threadChannelID)
+			return recoveredTranscript{}
+		}
+		if len(msgs) == 0 {
+			break
+		}
+		all = append(all, msgs...)
+		beforeID = msgs[len(msgs)-1].ID
+		if len(msgs) < limit {
+			break
+		}
 	}
-	recovered := recoveredTranscript{lines: make([]string, 0, len(msgs))}
-	for i := len(msgs) - 1; i >= 0; i-- {
-		msg := msgs[i]
+	sort.Slice(all, func(i, j int) bool {
+		if all[i] == nil {
+			return false
+		}
+		if all[j] == nil {
+			return true
+		}
+		return all[i].Timestamp.Before(all[j].Timestamp)
+	})
+	recovered := recoveredTranscript{lines: make([]string, 0, len(all))}
+	for _, msg := range all {
 		if msg == nil {
 			continue
 		}
@@ -363,7 +387,7 @@ func (o *sessionOutput) NoteSpeaker(ctx context.Context, userID, displayName str
 //     the final state.
 //
 // In both modes the operation is wrapped in the caller's ctx — Close
-// runs from the supervisor's teardown goroutine which gives us a 30s
+// runs from the supervisor's teardown goroutine which gives us a bounded
 // budget (long enough for an LLM call but bounded so a wedged provider
 // doesn't pin the supervisor).
 func (o *sessionOutput) Close(ctx context.Context, duration time.Duration) {
@@ -402,6 +426,8 @@ func (o *sessionOutput) Close(ctx context.Context, duration time.Duration) {
 	// Non-empty session → write a real summary if we have a summarizer,
 	// otherwise keep the legacy stats line.
 	finalText := o.finalSummaryTextLocked(duration, speakerCount, utterances)
+	plainFinalText := finalText
+	var finalEmbeds []*discordgo.MessageEmbed
 	if o.summarizer != nil && len(transcriptCopy) > 0 {
 		meta := channels.VoiceTranscriptSummaryMeta{
 			StartedAt:           o.startedAt,
@@ -433,16 +459,45 @@ func (o *sessionOutput) Close(ctx context.Context, duration time.Duration) {
 			o.log.Info("voice: transcript summarizer returned empty; falling back to stats line",
 				"lines", len(transcriptCopy))
 		default:
-			discordSummary := formatSummaryForDiscord(strings.TrimSpace(summary), speakers)
-			finalText = combineSummaryAndStats(discordSummary, finalText)
+			rendered := RenderFinalSummaryForDiscord(strings.TrimSpace(summary), finalText, speakers)
+			plainFinalText = rendered.FallbackContent
+			finalText = plainFinalText
+			finalEmbeds = rendered.Embeds
+			if len(finalEmbeds) > 0 {
+				finalText = rendered.Content
+			}
 		}
 	}
 
 	editCtx, cancel := context.WithTimeout(ctx, finalSummaryEditTimeout)
 	defer cancel()
-	if _, err := o.session.ChannelMessageEdit(o.transcriptChannelID, msgID, finalText, discordgo.WithContext(editCtx)); err != nil {
+	if len(finalEmbeds) > 0 {
+		if o.editFinalSummaryComplex(editCtx, msgID, finalText, finalEmbeds) {
+			return
+		}
+	}
+	if _, err := o.session.ChannelMessageEdit(o.transcriptChannelID, msgID, plainFinalText, discordgo.WithContext(editCtx)); err != nil {
 		o.log.Warn("voice: final summary edit failed", "err", err)
 	}
+}
+
+type discordSessionMessageEditComplexer interface {
+	ChannelMessageEditComplex(data *discordgo.MessageEdit, options ...discordgo.RequestOption) (*discordgo.Message, error)
+}
+
+func (o *sessionOutput) editFinalSummaryComplex(ctx context.Context, msgID, content string, embeds []*discordgo.MessageEmbed) bool {
+	api, ok := o.session.(discordSessionMessageEditComplexer)
+	if !ok {
+		return false
+	}
+	edit := discordgo.NewMessageEdit(o.transcriptChannelID, msgID)
+	edit.SetContent(content)
+	edit.SetEmbeds(embeds)
+	if _, err := api.ChannelMessageEditComplex(edit, discordgo.WithContext(ctx)); err != nil {
+		o.log.Warn("voice: final summary embed edit failed; falling back to plain text", "err", err)
+		return false
+	}
+	return true
 }
 
 // cleanupEmpty deletes the parent summary message and the attached
@@ -587,6 +642,183 @@ func formatSummaryForDiscord(summary string, speakers []channels.VoiceTranscript
 // wikilink brackets and known speaker names become user mentions.
 func FormatSummaryForDiscord(summary string, speakers []channels.VoiceTranscriptSpeaker) string {
 	return formatSummaryForDiscord(summary, speakers)
+}
+
+type DiscordSummaryRender struct {
+	Content         string
+	Embeds          []*discordgo.MessageEmbed
+	FallbackContent string
+}
+
+type voiceActionItem struct {
+	Owner string
+	Task  string
+}
+
+const (
+	summaryEmbedDescriptionMax = 2600
+	actionEmbedFieldNameMax    = 80
+	actionEmbedFieldValueMax   = 300
+	actionEmbedMaxFields       = 8
+	discordVoiceSummaryColor   = 0x5865F2
+	discordVoiceActionColor    = 0x57F287
+)
+
+// RenderFinalSummaryForDiscord converts an Obsidian/memory-oriented summary
+// into Discord output. FallbackContent is safe for clients that can only edit
+// plain message content; Content+Embeds uses richer Discord embeds so longer
+// summaries and proposed tasks are not squeezed into the 2000-character
+// message body.
+func RenderFinalSummaryForDiscord(summary, stats string, speakers []channels.VoiceTranscriptSpeaker) DiscordSummaryRender {
+	stats = strings.TrimSpace(stats)
+	main, actions := splitSummaryActionItems(summary)
+	discordMain := formatSummaryForDiscord(main, speakers)
+	fallbackSummary := formatSummaryForDiscord(summary, speakers)
+	out := DiscordSummaryRender{
+		Content:         stats,
+		FallbackContent: combineSummaryAndStats(fallbackSummary, stats),
+	}
+	if strings.TrimSpace(discordMain) != "" {
+		out.Embeds = append(out.Embeds, &discordgo.MessageEmbed{
+			Title:       "Session summary",
+			Description: truncateContent(discordMain, summaryEmbedDescriptionMax),
+			Color:       discordVoiceSummaryColor,
+		})
+	}
+	if actionEmbed := actionItemsEmbed(actions, speakers); actionEmbed != nil {
+		out.Embeds = append(out.Embeds, actionEmbed)
+	}
+	if len(out.Embeds) == 0 {
+		out.Content = out.FallbackContent
+	}
+	return out
+}
+
+func splitSummaryActionItems(summary string) (string, []voiceActionItem) {
+	lines := strings.Split(strings.TrimSpace(summary), "\n")
+	actionStart := -1
+	for i, line := range lines {
+		if isActionItemsHeading(line) {
+			actionStart = i
+			break
+		}
+	}
+	if actionStart < 0 {
+		return strings.TrimSpace(summary), nil
+	}
+
+	var main []string
+	main = append(main, lines[:actionStart]...)
+	var actions []voiceActionItem
+	for _, line := range lines[actionStart+1:] {
+		if isNonActionHeading(line) {
+			break
+		}
+		if item, ok := parseActionItemLine(line); ok {
+			actions = append(actions, item)
+		}
+	}
+	if len(actions) == 0 {
+		return strings.TrimSpace(summary), nil
+	}
+	return strings.TrimSpace(strings.Join(main, "\n")), actions
+}
+
+func isActionItemsHeading(line string) bool {
+	line = strings.ToLower(strings.TrimSpace(line))
+	line = strings.TrimLeft(line, "#")
+	line = strings.TrimSpace(strings.TrimSuffix(line, ":"))
+	switch line {
+	case "action items", "actions", "tasks", "follow-ups", "follow ups", "next steps":
+		return true
+	default:
+		return false
+	}
+}
+
+func isNonActionHeading(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "#") && !isActionItemsHeading(trimmed) {
+		return true
+	}
+	if strings.HasSuffix(trimmed, ":") && !strings.HasPrefix(trimmed, "-") && !strings.HasPrefix(trimmed, "*") {
+		return !isActionItemsHeading(trimmed)
+	}
+	return false
+}
+
+func parseActionItemLine(line string) (voiceActionItem, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return voiceActionItem{}, false
+	}
+	lower := strings.ToLower(line)
+	if strings.Contains(lower, "no action") || lower == "none" || strings.Contains(lower, "nothing assigned") {
+		return voiceActionItem{}, false
+	}
+	line = strings.TrimLeft(line, "-* ")
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return voiceActionItem{}, false
+	}
+	if len(line) > 2 && line[0] >= '0' && line[0] <= '9' {
+		if idx := strings.IndexAny(line, ".)"); idx > 0 && idx < 4 {
+			line = strings.TrimSpace(line[idx+1:])
+		}
+	}
+	owner := "Unassigned"
+	task := line
+	if before, after, ok := strings.Cut(line, ":"); ok {
+		before = strings.TrimSpace(before)
+		after = strings.TrimSpace(after)
+		if before != "" && after != "" && len([]rune(before)) <= 80 {
+			owner = before
+			task = after
+		}
+	}
+	task = strings.TrimSpace(task)
+	if task == "" {
+		return voiceActionItem{}, false
+	}
+	return voiceActionItem{Owner: owner, Task: task}, true
+}
+
+func actionItemsEmbed(actions []voiceActionItem, speakers []channels.VoiceTranscriptSpeaker) *discordgo.MessageEmbed {
+	if len(actions) == 0 {
+		return nil
+	}
+	embed := &discordgo.MessageEmbed{
+		Title: "Proposed tasks",
+		Color: discordVoiceActionColor,
+	}
+	for _, action := range actions {
+		if len(embed.Fields) >= actionEmbedMaxFields {
+			break
+		}
+		owner := formatSummaryForDiscord(action.Owner, speakers)
+		if strings.TrimSpace(owner) == "" {
+			owner = "Unassigned"
+		}
+		task := formatSummaryForDiscord(action.Task, speakers)
+		if strings.TrimSpace(task) == "" {
+			continue
+		}
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+			Name:   truncateContent(owner, actionEmbedFieldNameMax),
+			Value:  truncateContent(task, actionEmbedFieldValueMax),
+			Inline: false,
+		})
+	}
+	if len(actions) > len(embed.Fields) {
+		embed.Footer = &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("%d more task(s) in the memory summary", len(actions)-len(embed.Fields))}
+	}
+	if len(embed.Fields) == 0 {
+		return nil
+	}
+	return embed
 }
 
 func replaceWikilinksForDiscord(summary string, speakers []channels.VoiceTranscriptSpeaker) string {

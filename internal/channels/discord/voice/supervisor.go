@@ -340,6 +340,16 @@ func (s *Supervisor) onOwnVoiceState(ev *discordgo.VoiceStateUpdate) {
 		return // still in the right place (e.g., mute toggled)
 	}
 	// We thought we were connected but Discord just told us we're elsewhere.
+	// If Discord dropped the bot while humans are still in the target room,
+	// treat it as a transient voice disconnect: keep the transcript output open
+	// and rejoin inside this same one-shot job. A deliberate admin move to a
+	// different voice channel still arms the kick cooldown below.
+	if ev.ChannelID == "" && len(s.state.humans) > 0 {
+		s.log.Warn("voice: bot disconnected while humans remain; reconnecting",
+			"humans", len(s.state.humans))
+		s.reconnectLocked("bot_disconnected")
+		return
+	}
 	// Tear down cleanly and arm the kick cooldown.
 	s.state.kickedUntil = s.nowFn().Add(s.cfg.KickCooldown)
 	s.log.Warn("voice: bot removed from voice channel; cooling off",
@@ -468,6 +478,12 @@ func (s *Supervisor) reconcileLocked() {
 			}
 			s.state.idleLeaveTimer = nil
 		})
+	case humans == 0 && !connected && s.state.output != nil:
+		// A transient disconnect can leave us temporarily disconnected while
+		// preserving the transcript output for a reconnect. If the room empties
+		// before that reconnect succeeds, finish the logical session instead of
+		// orphaning an open output in a one-shot worker.
+		s.leaveLocked("idle_timeout")
 	}
 }
 
@@ -561,14 +577,21 @@ func (s *Supervisor) joinWorker() {
 // holding the supervisor lock for that long would block every concurrent
 // VoiceStateUpdate handler.
 func (s *Supervisor) onJoinSuccess(vc *discordgo.VoiceConnection) {
-	// REST-heavy setup BEFORE taking the lock. sessionOutput construction
-	// issues up to three REST calls (Channel lookup, ChannelMessageSend,
-	// MessageThreadStart). Total budget: 10s — enough for all three to
-	// complete on a tail-latency network, short enough that a wedged call
-	// doesn't keep the session half-wired.
-	setupCtx, cancelSetup := context.WithTimeout(context.Background(), 10*time.Second)
-	output := newSessionOutput(setupCtx, s.session, s.cfg.TranscriptChannelID, s.cfg.VoiceChannelID, s.resolvedGuildID, s.log, s.cfg.TranscriptSummarizer)
-	cancelSetup()
+	s.mu.Lock()
+	output := s.state.output
+	reusingOutput := output != nil
+	s.mu.Unlock()
+
+	if output == nil {
+		// REST-heavy setup BEFORE taking the lock. sessionOutput construction
+		// issues up to three REST calls (Channel lookup, ChannelMessageSend,
+		// MessageThreadStart). Total budget: 10s — enough for all three to
+		// complete on a tail-latency network, short enough that a wedged call
+		// doesn't keep the session half-wired.
+		setupCtx, cancelSetup := context.WithTimeout(context.Background(), 10*time.Second)
+		output = newSessionOutput(setupCtx, s.session, s.cfg.TranscriptChannelID, s.cfg.VoiceChannelID, s.resolvedGuildID, s.log, s.cfg.TranscriptSummarizer)
+		cancelSetup()
+	}
 	startedAt := s.nowFn()
 
 	s.mu.Lock()
@@ -589,7 +612,9 @@ func (s *Supervisor) onJoinSuccess(vc *discordgo.VoiceConnection) {
 
 	s.state.vc = vc
 	s.state.output = output
-	s.state.sessionStartedAt = startedAt
+	if !reusingOutput || s.state.sessionStartedAt.IsZero() {
+		s.state.sessionStartedAt = startedAt
+	}
 	s.state.joinFailures = 0
 	s.state.circuitOpenUntil = time.Time{}
 	// kickedUntil is normally in the past by the time a successful join
@@ -622,6 +647,57 @@ func (s *Supervisor) onJoinSuccess(vc *discordgo.VoiceConnection) {
 	if s.cfg.OnJoin != nil {
 		go s.cfg.OnJoin()
 	}
+}
+
+// reconnectLocked handles transient bot-side voice disconnects without ending
+// the logical voice session. It stops the voice socket consumers/producers but
+// deliberately keeps state.output and sessionStartedAt intact so the rejoin
+// continues the same transcript thread and final summary.
+func (s *Supervisor) reconnectLocked(reason string) {
+	vc := s.state.vc
+	dm := s.state.demux
+	tr := s.state.transcriber
+	wd := s.state.daveWatchdog
+	s.state.vc = nil
+	s.state.demux = nil
+	s.state.transcriber = nil
+	s.state.daveWatchdog = nil
+	if s.state.idleLeaveTimer != nil {
+		s.state.idleLeaveTimer.Stop()
+		s.state.idleLeaveTimer = nil
+	}
+	if vc == nil && dm == nil && tr == nil && wd == nil {
+		return
+	}
+
+	s.log.Info("voice: reconnecting voice channel", "reason", reason)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer safego.Recover(nil, "component", "voice.supervisor.reconnect")
+		if wd != nil {
+			wd.stop()
+		}
+		if dm != nil {
+			dm.stop()
+		}
+		if tr != nil {
+			tr.stop()
+		}
+		if vc != nil {
+			s.disconnectVoice(vc, "reconnect")
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.stopped.Load() {
+			return
+		}
+		if len(s.state.humans) > 0 {
+			s.reconcileLocked()
+			return
+		}
+		s.leaveLocked("idle_timeout")
+	}()
 }
 
 // leaveLocked tears down the active VoiceConnection and the subsystems
@@ -698,7 +774,7 @@ func (s *Supervisor) leaveLocked(reason string) {
 			// delete-summary on the empty-session path) OR a bounded
 			// LLM summarizer call plus a separate final-summary edit
 			// on the non-empty path.
-			closeCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			closeCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 			output.Close(closeCtx, duration)
 			cancel()
 		}

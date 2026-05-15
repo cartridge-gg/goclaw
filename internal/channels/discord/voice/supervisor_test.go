@@ -213,6 +213,52 @@ func Test_onOwnVoiceState_detects_kick_when_connected(t *testing.T) {
 	}
 }
 
+func Test_onOwnVoiceState_reconnects_one_shot_job_when_disconnected_with_humans(t *testing.T) {
+	sup := newTestSupervisor(t, Config{KickCooldown: 5 * time.Minute, StopAfterSession: true})
+	output := &sessionOutput{}
+	startedAt := time.Now().Add(-10 * time.Minute)
+	sup.mu.Lock()
+	sup.state.vc = &discordgo.VoiceConnection{}
+	sup.state.output = output
+	sup.state.sessionStartedAt = startedAt
+	sup.state.humans["u1"] = struct{}{}
+	sup.mu.Unlock()
+
+	sup.onOwnVoiceState(&discordgo.VoiceStateUpdate{VoiceState: &discordgo.VoiceState{
+		GuildID:   sup.resolvedGuildID,
+		ChannelID: "",
+		UserID:    sup.botUserID,
+	}})
+
+	sup.mu.Lock()
+	stopped := sup.stopped.Load()
+	kicked := !sup.state.kickedUntil.IsZero()
+	sameOutput := sup.state.output == output
+	sameStartedAt := sup.state.sessionStartedAt.Equal(startedAt)
+	connected := sup.state.vc != nil
+	sup.mu.Unlock()
+
+	if stopped {
+		t.Fatal("transient disconnect must not stop a one-shot voice job while humans remain")
+	}
+	if kicked {
+		t.Fatal("transient disconnect with humans should not arm kick cooldown")
+	}
+	if !sameOutput {
+		t.Fatal("transient reconnect must preserve the transcript output")
+	}
+	if !sameStartedAt {
+		t.Fatal("transient reconnect must preserve the original session start")
+	}
+	if connected {
+		t.Fatal("old voice connection should be detached before reconnect")
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	sup.Stop(stopCtx)
+}
+
 func Test_onOwnVoiceState_ignores_when_not_connected(t *testing.T) {
 	sup := newTestSupervisor(t, Config{})
 	// No active vc.

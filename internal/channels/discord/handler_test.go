@@ -137,7 +137,7 @@ func TestIsVoiceSummaryRegenerationRequest(t *testing.T) {
 		{"can you rerun the transcript summary?", true},
 		{"backfill voice summary please", true},
 		{"refresh summarization", true},
-		{"summarize this unrelated thread", false},
+		{"summarize this", true},
 		{"regenerate the test data", false},
 		{"hello", false},
 	}
