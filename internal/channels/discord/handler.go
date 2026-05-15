@@ -186,6 +186,12 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 			referencedMessage.Author.ID == c.botUserID {
 			mentioned = true
 		}
+		// A thread created by this bot is already an explicit work context.
+		// Let follow-up messages steer that job without requiring another
+		// @mention on every turn.
+		if !mentioned && c.autoRespondsInOwnThread(channelID) {
+			mentioned = true
+		}
 		if !mentioned {
 			// Collect media file paths for group history context.
 			var mediaPaths []string

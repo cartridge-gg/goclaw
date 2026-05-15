@@ -144,23 +144,24 @@ type TelegramTopicConfig struct {
 }
 
 type DiscordConfig struct {
-	Enabled             bool                `json:"enabled"`
-	Token               string              `json:"token"`
-	AllowFrom           FlexibleStringSlice `json:"allow_from"`
-	DMPolicy            string              `json:"dm_policy,omitempty"`            // "open" (default), "allowlist", "disabled"
-	GroupPolicy         string              `json:"group_policy,omitempty"`         // "open" (default), "allowlist", "disabled"
-	RequireMention      *bool               `json:"require_mention,omitempty"`      // require @bot mention in groups (default true)
-	HistoryLimit        int                 `json:"history_limit,omitempty"`        // max pending group messages for context (default 50, 0=disabled)
-	BlockReply          *bool               `json:"block_reply,omitempty"`          // override gateway block_reply (nil = inherit)
-	MediaMaxBytes       int64               `json:"media_max_bytes,omitempty"`      // max media download size (default 25MB)
-	SuppressPlaceholder *bool               `json:"suppress_placeholder,omitempty"` // skip "Thinking..." placeholder + edit; rely on typing indicator for the full run (default false)
-	SlashCommands       *bool               `json:"slash_commands,omitempty"`       // register /ask, /status, /help, /recall, /summarize on startup (default true)
-	TestGuildID         string              `json:"test_guild_id,omitempty"`        // dev escape hatch: register slash commands to this guild only (instant) instead of globally (~1h propagation)
-	STTProxyURL         string              `json:"stt_proxy_url,omitempty"`
-	STTAPIKey           string              `json:"stt_api_key,omitempty"`
-	STTTenantID         string              `json:"stt_tenant_id,omitempty"`
-	STTTimeoutSeconds   int                 `json:"stt_timeout_seconds,omitempty"`
-	VoiceAgentID        string              `json:"voice_agent_id,omitempty"` // routes UPLOADED voice-message attachments to a specific agent. NOT the voice-channel-join feature below.
+	Enabled                 bool                `json:"enabled"`
+	Token                   string              `json:"token"`
+	AllowFrom               FlexibleStringSlice `json:"allow_from"`
+	DMPolicy                string              `json:"dm_policy,omitempty"`                   // "open" (default), "allowlist", "disabled"
+	GroupPolicy             string              `json:"group_policy,omitempty"`                // "open" (default), "allowlist", "disabled"
+	RequireMention          *bool               `json:"require_mention,omitempty"`             // require @bot mention in groups (default true)
+	AutoRespondInOwnThreads *bool               `json:"auto_respond_in_own_threads,omitempty"` // respond in Discord threads owned by this bot even without an explicit mention
+	HistoryLimit            int                 `json:"history_limit,omitempty"`               // max pending group messages for context (default 50, 0=disabled)
+	BlockReply              *bool               `json:"block_reply,omitempty"`                 // override gateway block_reply (nil = inherit)
+	MediaMaxBytes           int64               `json:"media_max_bytes,omitempty"`             // max media download size (default 25MB)
+	SuppressPlaceholder     *bool               `json:"suppress_placeholder,omitempty"`        // skip "Thinking..." placeholder + edit; rely on typing indicator for the full run (default false)
+	SlashCommands           *bool               `json:"slash_commands,omitempty"`              // register /ask, /status, /help, /recall, /summarize on startup (default true)
+	TestGuildID             string              `json:"test_guild_id,omitempty"`               // dev escape hatch: register slash commands to this guild only (instant) instead of globally (~1h propagation)
+	STTProxyURL             string              `json:"stt_proxy_url,omitempty"`
+	STTAPIKey               string              `json:"stt_api_key,omitempty"`
+	STTTenantID             string              `json:"stt_tenant_id,omitempty"`
+	STTTimeoutSeconds       int                 `json:"stt_timeout_seconds,omitempty"`
+	VoiceAgentID            string              `json:"voice_agent_id,omitempty"` // routes UPLOADED voice-message attachments to a specific agent. NOT the voice-channel-join feature below.
 
 	// Real-time voice-channel join + transcription. A bot with these set
 	// listens for VoiceStateUpdate events in the given guild, joins the

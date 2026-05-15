@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -217,6 +218,11 @@ func (t *SpawnJobTool) Execute(ctx context.Context, args map[string]any) *Result
 
 	discordSink, hasDiscord := firstDiscordSink(req.Sinks)
 	if hasDiscord {
+		controlDir := spawnJobControlDir(req.WorktreePath, req.JobID)
+		if req.Env == nil {
+			req.Env = map[string]string{}
+		}
+		req.Env["AGENT_JOB_CONTROL_DIR"] = controlDir
 		if tenantID == uuid.Nil {
 			return ErrorResult("spawn_job: no tenant in context — refusing Discord job")
 		}
@@ -332,6 +338,23 @@ func parseSpawnJobArgs(args map[string]any) (SpawnJobRequest, error) {
 }
 
 func (t *SpawnJobTool) createTaskRow(ctx context.Context, id uuid.UUID, tenantID uuid.UUID, parentSessionKey string, req SpawnJobRequest, sink JobSink) error {
+	controlDir := req.Env["AGENT_JOB_CONTROL_DIR"]
+	metadata := map[string]any{
+		"runner":         "spawn_job",
+		"kind":           req.Kind,
+		"command":        req.Command,
+		"args":           req.Args,
+		"cwd":            req.Cwd,
+		"workspace_root": req.WorkspaceRoot,
+		"worktree_path":  req.WorktreePath,
+		"sinks":          req.Sinks,
+	}
+	if controlDir != "" {
+		metadata["control_dir"] = controlDir
+		metadata["control_path"] = filepath.Join(controlDir, "control.jsonl")
+		metadata["status_path"] = filepath.Join(controlDir, "status.json")
+		metadata["events_path"] = filepath.Join(controlDir, "events.jsonl")
+	}
 	row := &store.SubagentTaskData{
 		BaseModel:      store.BaseModel{ID: id},
 		TenantID:       tenantID,
@@ -343,16 +366,7 @@ func (t *SpawnJobTool) createTaskRow(ctx context.Context, id uuid.UUID, tenantID
 		OriginChannel:  strPtr(sink.Channel),
 		OriginChatID:   strPtr(sink.ThreadID),
 		OriginPeerKind: strPtr("group"),
-		Metadata: map[string]any{
-			"runner":         "spawn_job",
-			"kind":           req.Kind,
-			"command":        req.Command,
-			"args":           req.Args,
-			"cwd":            req.Cwd,
-			"workspace_root": req.WorkspaceRoot,
-			"worktree_path":  req.WorktreePath,
-			"sinks":          req.Sinks,
-		},
+		Metadata:       metadata,
 	}
 	if parentSessionKey != "" {
 		row.SessionKey = &parentSessionKey
@@ -361,6 +375,14 @@ func (t *SpawnJobTool) createTaskRow(ctx context.Context, id uuid.UUID, tenantID
 		return nil
 	}
 	return t.taskStore.Create(ctx, row)
+}
+
+func spawnJobControlDir(worktreePath, jobID string) string {
+	root := strings.TrimSpace(worktreePath)
+	if root == "" {
+		root = "/data/workspace-eng"
+	}
+	return filepath.Join(root, ".gillen", "jobs", jobID)
 }
 
 func firstDiscordSink(sinks []JobSink) (JobSink, bool) {

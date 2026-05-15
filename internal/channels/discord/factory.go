@@ -19,21 +19,22 @@ type discordCreds struct {
 
 // discordInstanceConfig maps the non-secret config JSONB from the channel_instances table.
 type discordInstanceConfig struct {
-	DMPolicy            string   `json:"dm_policy,omitempty"`
-	GroupPolicy         string   `json:"group_policy,omitempty"`
-	AllowFrom           []string `json:"allow_from,omitempty"`
-	RequireMention      *bool    `json:"require_mention,omitempty"`
-	HistoryLimit        int      `json:"history_limit,omitempty"`
-	BlockReply          *bool    `json:"block_reply,omitempty"`
-	MediaMaxBytes       int64    `json:"media_max_bytes,omitempty"`
-	SuppressPlaceholder *bool    `json:"suppress_placeholder,omitempty"`
-	SlashCommands       *bool    `json:"slash_commands,omitempty"`
-	TestGuildID         string   `json:"test_guild_id,omitempty"`
-	STTProxyURL         string   `json:"stt_proxy_url,omitempty"`
-	STTAPIKey           string   `json:"stt_api_key,omitempty"`
-	STTTenantID         string   `json:"stt_tenant_id,omitempty"`
-	STTTimeoutSeconds   int      `json:"stt_timeout_seconds,omitempty"`
-	VoiceAgentID        string   `json:"voice_agent_id,omitempty"` // NOT the real-time voice feature — see VoiceChannelEnabled below.
+	DMPolicy                string   `json:"dm_policy,omitempty"`
+	GroupPolicy             string   `json:"group_policy,omitempty"`
+	AllowFrom               []string `json:"allow_from,omitempty"`
+	RequireMention          *bool    `json:"require_mention,omitempty"`
+	AutoRespondInOwnThreads *bool    `json:"auto_respond_in_own_threads,omitempty"`
+	HistoryLimit            int      `json:"history_limit,omitempty"`
+	BlockReply              *bool    `json:"block_reply,omitempty"`
+	MediaMaxBytes           int64    `json:"media_max_bytes,omitempty"`
+	SuppressPlaceholder     *bool    `json:"suppress_placeholder,omitempty"`
+	SlashCommands           *bool    `json:"slash_commands,omitempty"`
+	TestGuildID             string   `json:"test_guild_id,omitempty"`
+	STTProxyURL             string   `json:"stt_proxy_url,omitempty"`
+	STTAPIKey               string   `json:"stt_api_key,omitempty"`
+	STTTenantID             string   `json:"stt_tenant_id,omitempty"`
+	STTTimeoutSeconds       int      `json:"stt_timeout_seconds,omitempty"`
+	VoiceAgentID            string   `json:"voice_agent_id,omitempty"` // NOT the real-time voice feature — see VoiceChannelEnabled below.
 
 	// Real-time voice-channel join + transcription. VoiceChannelEnabled gates
 	// the feature; VoiceChannelID and VoiceChannelTranscriptChannelID are
@@ -97,23 +98,24 @@ func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
 	}
 
 	dcCfg := config.DiscordConfig{
-		Enabled:             true,
-		Token:               c.Token,
-		AllowFrom:           ic.AllowFrom,
-		DMPolicy:            ic.DMPolicy,
-		GroupPolicy:         ic.GroupPolicy,
-		RequireMention:      ic.RequireMention,
-		HistoryLimit:        ic.HistoryLimit,
-		BlockReply:          ic.BlockReply,
-		MediaMaxBytes:       ic.MediaMaxBytes,
-		SuppressPlaceholder: ic.SuppressPlaceholder,
-		SlashCommands:       ic.SlashCommands,
-		TestGuildID:         ic.TestGuildID,
-		STTProxyURL:         ic.STTProxyURL,
-		STTAPIKey:           ic.STTAPIKey,
-		STTTenantID:         ic.STTTenantID,
-		STTTimeoutSeconds:   ic.STTTimeoutSeconds,
-		VoiceAgentID:        ic.VoiceAgentID,
+		Enabled:                 true,
+		Token:                   c.Token,
+		AllowFrom:               ic.AllowFrom,
+		DMPolicy:                ic.DMPolicy,
+		GroupPolicy:             ic.GroupPolicy,
+		RequireMention:          ic.RequireMention,
+		AutoRespondInOwnThreads: ic.AutoRespondInOwnThreads,
+		HistoryLimit:            ic.HistoryLimit,
+		BlockReply:              ic.BlockReply,
+		MediaMaxBytes:           ic.MediaMaxBytes,
+		SuppressPlaceholder:     ic.SuppressPlaceholder,
+		SlashCommands:           ic.SlashCommands,
+		TestGuildID:             ic.TestGuildID,
+		STTProxyURL:             ic.STTProxyURL,
+		STTAPIKey:               ic.STTAPIKey,
+		STTTenantID:             ic.STTTenantID,
+		STTTimeoutSeconds:       ic.STTTimeoutSeconds,
+		VoiceAgentID:            ic.VoiceAgentID,
 
 		VoiceChannelEnabled:             ic.VoiceChannelEnabled,
 		VoiceChannelID:                  ic.VoiceChannelID,

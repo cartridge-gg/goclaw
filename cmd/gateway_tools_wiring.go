@@ -53,6 +53,9 @@ func wireExtraTools(
 	toolsReg.Register(tools.NewSendFileTool(workspace, agentCfg.RestrictToWorkspace))
 	// Group members tool (list members in group chats)
 	toolsReg.Register(tools.NewListGroupMembersTool())
+	// Scoped control for Codex-backed spawned jobs in the current Discord thread.
+	toolsReg.Register(tools.NewCodexJobControlTool(pgStores.SubagentTasks))
+	slog.Info("codex_job_control tool registered")
 	// Discord thread creation tool
 	toolsReg.Register(tools.NewCreateDiscordThreadTool())
 	// Discord rich embed tool

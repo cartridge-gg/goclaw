@@ -99,6 +99,7 @@ func builtinToolSeedData() []store.BuiltinToolDef {
 		{Name: "cron", DisplayName: "Cron Scheduler", Description: "Schedule or manage recurring tasks using cron expressions, at-times, or intervals", Category: "scheduling", Enabled: true,
 			Metadata: json.RawMessage(`{"config_hint":"Config → Cron"}`),
 		},
+		{Name: "codex_job_control", DisplayName: "Codex Job Control", Description: "Inspect, steer, interrupt, or queue scoped JSON-RPC for the active Codex-backed job in the current thread", Category: "automation", Enabled: true},
 
 		// subagents
 		{Name: "spawn", DisplayName: "Spawn", Description: "Spawn a subagent to handle a task in the background", Category: "subagents", Enabled: true,

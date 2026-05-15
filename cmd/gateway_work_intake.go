@@ -19,6 +19,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
@@ -47,6 +48,9 @@ Respond with exactly one JSON object and no prose:
 {"work_intake":true|false,"reason":"short reason"}`
 
 func maybeHandleWorkIntake(ctx context.Context, msg bus.InboundMessage, deps *ConsumerDeps, agentID, peerKind, sessionKey string, ag agent.Agent) bool {
+	if maybeHandleWorkIntakeThreadAction(ctx, msg, deps, agentID, peerKind, sessionKey) {
+		return true
+	}
 	route, ok := matchWorkIntakeRoute(deps.Cfg.Gateway.WorkIntake, msg, agentID, peerKind)
 	if !ok {
 		return false
@@ -142,6 +146,115 @@ func maybeHandleWorkIntake(ctx context.Context, msg bus.InboundMessage, deps *Co
 	)
 	publishWorkIntakeThreadMessage(deps, msg, thread.ThreadID, "Started the planning Job. Progress and any planning questions will appear here.")
 	return true
+}
+
+func maybeHandleWorkIntakeThreadAction(ctx context.Context, msg bus.InboundMessage, deps *ConsumerDeps, agentID, peerKind, sessionKey string) bool {
+	if peerKind != string(sessions.PeerGroup) || msg.Metadata["is_thread"] != "true" || !looksLikePlanImplementRequest(msg.Content) {
+		return false
+	}
+	if deps.SubagentTasks == nil {
+		publishWorkIntakeError(deps, msg, "I can't start implementation because job task persistence is not available.")
+		return true
+	}
+	if deps.Cfg.Gateway.JobsCallbackSecret == "" {
+		publishWorkIntakeError(deps, msg, "I can't start implementation because the job callback secret is not configured.")
+		return true
+	}
+	planTask, runningTask, err := latestPlanAndRunningImplementation(ctx, deps.SubagentTasks, sessionKey, msg.Channel, msg.ChatID)
+	if err != nil {
+		publishWorkIntakeError(deps, msg, "I couldn't inspect the planning state: "+err.Error())
+		return true
+	}
+	if runningTask != nil {
+		publishWorkIntakeThreadMessage(deps, msg, msg.ChatID, fmt.Sprintf("Implementation is already running for this plan: `%s`.", runningTask.ID.String()))
+		return true
+	}
+	if planTask == nil {
+		publishWorkIntakeThreadMessage(deps, msg, msg.ChatID, "I couldn't find a completed planning Job attached to this thread. Please use the Implement button on the plan, or ask me to make a new plan.")
+		return true
+	}
+
+	worktree := metadataString(planTask.Metadata, "worktree_path")
+	workspaceRoot := firstNonEmpty(metadataString(planTask.Metadata, "workspace_root"), defaultWorkIntakeRoot)
+	if worktree == "" {
+		worktree = workspaceRoot
+	}
+	tool := tools.NewSpawnJobTool(deps.SubagentTasks, deps.Cfg.Gateway.AgentServiceURL, []byte(deps.Cfg.Gateway.JobsCallbackSecret))
+	toolCtx := tools.WithToolChannel(ctx, msg.Channel)
+	toolCtx = tools.WithToolChatID(toolCtx, msg.ChatID)
+	toolCtx = tools.WithToolPeerKind(toolCtx, string(sessions.PeerGroup))
+	toolCtx = tools.WithToolAgentKey(toolCtx, agentID)
+	toolCtx = tools.WithToolSessionKey(toolCtx, sessionKey)
+
+	args := map[string]any{
+		"kind":           "impl",
+		"command":        "/app/agent/bin/run-discord-task-pipeline",
+		"args":           []any{"--plan-job-id", planTask.ID.String()},
+		"cwd":            workspaceRoot,
+		"workspace_root": workspaceRoot,
+		"worktree_path":  worktree,
+		"timeout":        "2h",
+		"sinks":          []any{map[string]any{"type": "discord", "channel": msg.Channel, "thread_id": msg.ChatID}},
+	}
+	result := tool.Execute(toolCtx, args)
+	if result.IsError {
+		publishWorkIntakeThreadMessage(deps, msg, msg.ChatID, "I found the plan, but could not start the implementation Job:\n"+result.ForLLM)
+		return true
+	}
+	publishWorkIntakeThreadMessage(deps, msg, msg.ChatID, "Started the implementation Job from the latest plan. Progress will appear here.")
+	return true
+}
+
+func looksLikePlanImplementRequest(content string) bool {
+	lower := strings.ToLower(strings.TrimSpace(stripWorkIntakeScaffolding(content)))
+	if lower == "" {
+		return false
+	}
+	hasPlan := strings.Contains(lower, "plan") || strings.Contains(lower, "this")
+	hasImplement := strings.Contains(lower, "implement") ||
+		strings.Contains(lower, "ship") ||
+		strings.Contains(lower, "do this") ||
+		strings.Contains(lower, "let's do this") ||
+		strings.Contains(lower, "lets do this")
+	return hasPlan && hasImplement
+}
+
+func latestPlanAndRunningImplementation(ctx context.Context, taskStore store.SubagentTaskStore, sessionKey, channel, chatID string) (*store.SubagentTaskData, *store.SubagentTaskData, error) {
+	tasks, err := taskStore.ListBySession(ctx, sessionKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	var latestPlan *store.SubagentTaskData
+	var runningImpl *store.SubagentTaskData
+	for i := range tasks {
+		task := &tasks[i]
+		if channel != "" && (task.OriginChannel == nil || *task.OriginChannel != channel) {
+			continue
+		}
+		if chatID != "" && (task.OriginChatID == nil || *task.OriginChatID != chatID) {
+			continue
+		}
+		kind := metadataString(task.Metadata, "kind")
+		if task.Status == "running" && (kind == "impl" || kind == "implementation") {
+			runningImpl = task
+			break
+		}
+		if latestPlan == nil && kind == "autoplan" && task.Status == "done" {
+			latestPlan = task
+		}
+	}
+	return latestPlan, runningImpl, nil
+}
+
+func metadataString(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	v := m[key]
+	if v == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(v))
 }
 
 func matchWorkIntakeRoute(cfg config.WorkIntakeConfig, msg bus.InboundMessage, agentID, peerKind string) (config.WorkIntakeRoute, bool) {
