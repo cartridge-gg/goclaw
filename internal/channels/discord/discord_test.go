@@ -74,8 +74,12 @@ func TestAutoRespondsInOwnThreadHonorsExcludedParentChannel(t *testing.T) {
 		t.Fatalf("discordgo.New() error = %v", err)
 	}
 	session.State = discordgo.NewState()
+	if err := session.State.GuildAdd(&discordgo.Guild{ID: "guild-1"}); err != nil {
+		t.Fatalf("GuildAdd: %v", err)
+	}
 	if err := session.State.ChannelAdd(&discordgo.Channel{
 		ID:       "thread-1",
+		GuildID:  "guild-1",
 		ParentID: "agents-log",
 		OwnerID:  "bot-1",
 		Type:     discordgo.ChannelTypeGuildPublicThread,
@@ -84,6 +88,7 @@ func TestAutoRespondsInOwnThreadHonorsExcludedParentChannel(t *testing.T) {
 	}
 	if err := session.State.ChannelAdd(&discordgo.Channel{
 		ID:       "thread-2",
+		GuildID:  "guild-1",
 		ParentID: "controller",
 		OwnerID:  "bot-1",
 		Type:     discordgo.ChannelTypeGuildPublicThread,
