@@ -265,6 +265,11 @@ func (c *Channel) autoRespondsInOwnThread(channelID string) bool {
 	if ch.OwnerID != c.botUserID {
 		return false
 	}
+	for _, parentID := range c.config.AutoRespondExcludedParentChannelIDs {
+		if strings.TrimSpace(parentID) != "" && ch.ParentID == strings.TrimSpace(parentID) {
+			return false
+		}
+	}
 	switch ch.Type {
 	case discordgo.ChannelTypeGuildNewsThread, discordgo.ChannelTypeGuildPublicThread, discordgo.ChannelTypeGuildPrivateThread:
 		return true

@@ -12,6 +12,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/typing"
+	"github.com/nextlevelbuilder/goclaw/internal/config"
 )
 
 func TestSendStopsTypingAfterPlaceholderEditSucceeds(t *testing.T) {
@@ -63,6 +64,52 @@ func TestSendStopsTypingAfterPlaceholderEditSucceeds(t *testing.T) {
 	}
 	if _, ok := ch.typingCtrls.Load("channel-1"); ok {
 		t.Fatal("expected typing controller to be removed after successful delivery")
+	}
+}
+
+func TestAutoRespondsInOwnThreadHonorsExcludedParentChannel(t *testing.T) {
+	enabled := true
+	session, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	session.State = discordgo.NewState()
+	if err := session.State.GuildAdd(&discordgo.Guild{ID: "guild-1"}); err != nil {
+		t.Fatalf("GuildAdd: %v", err)
+	}
+	if err := session.State.ChannelAdd(&discordgo.Channel{
+		ID:       "thread-1",
+		GuildID:  "guild-1",
+		ParentID: "agents-log",
+		OwnerID:  "bot-1",
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	}); err != nil {
+		t.Fatalf("ChannelAdd: %v", err)
+	}
+	if err := session.State.ChannelAdd(&discordgo.Channel{
+		ID:       "thread-2",
+		GuildID:  "guild-1",
+		ParentID: "controller",
+		OwnerID:  "bot-1",
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+	}); err != nil {
+		t.Fatalf("ChannelAdd: %v", err)
+	}
+
+	ch := &Channel{
+		session:   session,
+		botUserID: "bot-1",
+		config: config.DiscordConfig{
+			AutoRespondInOwnThreads:             &enabled,
+			AutoRespondExcludedParentChannelIDs: []string{"agents-log"},
+		},
+	}
+
+	if ch.autoRespondsInOwnThread("thread-1") {
+		t.Fatal("agents-log child thread should still require an explicit mention")
+	}
+	if !ch.autoRespondsInOwnThread("thread-2") {
+		t.Fatal("non-excluded bot-owned thread should auto-respond")
 	}
 }
 
