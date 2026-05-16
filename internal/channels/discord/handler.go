@@ -17,6 +17,12 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
+const (
+	referencedMessageContextMaxLen = 2500
+	referencedMessageEmbedMax      = 3
+	referencedMessageEmbedFieldMax = 20
+)
+
 // handleMessage processes incoming Discord messages.
 func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate) {
 	ctx := context.Background()
@@ -77,7 +83,7 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 		if referencedMessage.Author != nil {
 			author = referencedMessage.Author.Username
 		}
-		body := channels.Truncate(referencedMessage.Content, 500)
+		body := formatReferencedMessageBody(referencedMessage)
 		replyCtx := fmt.Sprintf("[Replying to %s]\n%s\n[/Replying]", author, body)
 		if content != "" {
 			content = replyCtx + "\n\n" + content
@@ -345,6 +351,91 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 	if peerKind == "group" {
 		c.GroupHistory().Clear(channelID)
 	}
+}
+
+func formatReferencedMessageBody(m *discordgo.Message) string {
+	if m == nil {
+		return ""
+	}
+
+	var parts []string
+	if content := strings.TrimSpace(m.Content); content != "" {
+		parts = append(parts, content)
+	}
+	if embeds := formatReferencedMessageEmbeds(m.Embeds); embeds != "" {
+		parts = append(parts, embeds)
+	}
+
+	body := strings.TrimSpace(strings.Join(parts, "\n\n"))
+	if body == "" {
+		body = "[no text content]"
+	}
+	return channels.Truncate(body, referencedMessageContextMaxLen)
+}
+
+func formatReferencedMessageEmbeds(embeds []*discordgo.MessageEmbed) string {
+	if len(embeds) == 0 {
+		return ""
+	}
+
+	var blocks []string
+	for _, embed := range embeds {
+		if embed == nil {
+			continue
+		}
+		if len(blocks) >= referencedMessageEmbedMax {
+			break
+		}
+
+		lines := []string{"[Embed]"}
+		if len(embeds) > 1 {
+			lines[0] = fmt.Sprintf("[Embed %d]", len(blocks)+1)
+		}
+		if title := strings.TrimSpace(embed.Title); title != "" {
+			lines = append(lines, title)
+		}
+		if description := strings.TrimSpace(embed.Description); description != "" {
+			lines = append(lines, description)
+		}
+		fieldCount := 0
+		for _, field := range embed.Fields {
+			if field == nil {
+				continue
+			}
+			if fieldCount >= referencedMessageEmbedFieldMax {
+				break
+			}
+			name := strings.TrimSpace(field.Name)
+			value := strings.TrimSpace(field.Value)
+			addedField := false
+			switch {
+			case name != "" && value != "":
+				lines = append(lines, fmt.Sprintf("%s: %s", name, value))
+				addedField = true
+			case name != "":
+				lines = append(lines, name)
+				addedField = true
+			case value != "":
+				lines = append(lines, value)
+				addedField = true
+			}
+			if addedField {
+				fieldCount++
+			}
+		}
+		if embed.Footer != nil {
+			if footer := strings.TrimSpace(embed.Footer.Text); footer != "" {
+				lines = append(lines, "Footer: "+footer)
+			}
+		}
+		if len(lines) == 1 {
+			continue
+		}
+		lines = append(lines, "[/Embed]")
+		blocks = append(blocks, strings.Join(lines, "\n"))
+	}
+
+	return strings.Join(blocks, "\n\n")
 }
 
 func (c *Channel) resolveReferencedMessage(ctx context.Context, m *discordgo.MessageCreate) *discordgo.Message {

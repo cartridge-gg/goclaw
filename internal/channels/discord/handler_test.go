@@ -379,6 +379,56 @@ func TestResolveMediaEmpty(t *testing.T) {
 	}
 }
 
+func TestFormatReferencedMessageBodyIncludesEmbedFields(t *testing.T) {
+	msg := &discordgo.Message{
+		Embeds: []*discordgo.MessageEmbed{
+			{
+				Title:       "Billing email needs help - Watkins Legal PC",
+				Description: "Invoice #2014 for $1,149.00 received from Watkins Legal PC.",
+				Fields: []*discordgo.MessageEmbedField{
+					{Name: "Invoice", Value: "#2014 - $1,149.00 USD"},
+					{Name: "Unresolved - Recipient", Value: "ACH and domesticWire recipients exist. Recent payment used domesticWire."},
+					{Name: "Duplicate check", Value: "No duplicate risk."},
+				},
+			},
+		},
+	}
+
+	got := formatReferencedMessageBody(msg)
+	for _, want := range []string{
+		"[Embed]",
+		"Billing email needs help - Watkins Legal PC",
+		"Invoice: #2014 - $1,149.00 USD",
+		"Unresolved - Recipient: ACH and domesticWire recipients exist. Recent payment used domesticWire.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatReferencedMessageBody() missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestFormatReferencedMessageBodyIncludesContentAndEmbed(t *testing.T) {
+	msg := &discordgo.Message{
+		Content: "Plain fallback text",
+		Embeds: []*discordgo.MessageEmbed{
+			{
+				Title: "Approval needed",
+				Fields: []*discordgo.MessageEmbedField{
+					{Name: "Amount", Value: "$42.00"},
+				},
+			},
+		},
+	}
+
+	got := formatReferencedMessageBody(msg)
+	if !strings.Contains(got, "Plain fallback text") {
+		t.Fatalf("formatReferencedMessageBody() missing content in:\n%s", got)
+	}
+	if !strings.Contains(got, "Amount: $42.00") {
+		t.Fatalf("formatReferencedMessageBody() missing embed field in:\n%s", got)
+	}
+}
+
 func TestResolveReferencedMessageFetchesWhenGatewayDidNotHydrateReply(t *testing.T) {
 	var fetched bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -397,6 +447,7 @@ func TestResolveReferencedMessageFetchesWhenGatewayDidNotHydrateReply(t *testing
 			"channel_id":"ref-channel",
 			"content":"unzip nums-metrics.zip and run the metrics scripts",
 			"author":{"id":"broody","username":"broody"},
+			"embeds":[{"title":"Billing email needs help - Watkins Legal PC","fields":[{"name":"Amount","value":"$1,149.00"}]}],
 			"attachments":[{"id":"att-1","filename":"nums-metrics.zip","url":"https://cdn.example/nums-metrics.zip","size":42}]
 		}`))
 	}))
@@ -427,5 +478,8 @@ func TestResolveReferencedMessageFetchesWhenGatewayDidNotHydrateReply(t *testing
 	}
 	if len(got.Attachments) != 1 || got.Attachments[0].Filename != "nums-metrics.zip" {
 		t.Fatalf("attachments = %+v", got.Attachments)
+	}
+	if len(got.Embeds) != 1 || got.Embeds[0].Title != "Billing email needs help - Watkins Legal PC" {
+		t.Fatalf("embeds = %+v", got.Embeds)
 	}
 }
