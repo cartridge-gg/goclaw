@@ -247,6 +247,37 @@ func (c *Channel) logApplicationInteractionDiagnostics() {
 		"interactions_endpoint_host", endpointHost)
 }
 
+func (c *Channel) autoRespondsInOwnThread(channelID string) bool {
+	if c == nil || c.config.AutoRespondInOwnThreads == nil || !*c.config.AutoRespondInOwnThreads {
+		return false
+	}
+	if c.botUserID == "" || c.session == nil || c.session.State == nil || channelID == "" {
+		return false
+	}
+	ch, err := c.session.State.Channel(channelID)
+	if err != nil || ch == nil {
+		ch, err = c.session.Channel(channelID)
+		if err != nil || ch == nil {
+			slog.Debug("discord: auto-respond thread lookup failed", "channel_id", channelID, "error", err)
+			return false
+		}
+	}
+	if ch.OwnerID != c.botUserID {
+		return false
+	}
+	for _, parentID := range c.config.AutoRespondExcludedParentChannelIDs {
+		if strings.TrimSpace(parentID) != "" && ch.ParentID == strings.TrimSpace(parentID) {
+			return false
+		}
+	}
+	switch ch.Type {
+	case discordgo.ChannelTypeGuildNewsThread, discordgo.ChannelTypeGuildPublicThread, discordgo.ChannelTypeGuildPrivateThread:
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *Channel) autoClearApplicationInteractionsEndpoint() bool {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv("GOCLAW_DISCORD_AUTOCLEAR_INTERACTIONS_ENDPOINT")))
 	return v != "0" && v != "false" && v != "no"
