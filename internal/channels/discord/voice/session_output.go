@@ -33,6 +33,7 @@ const (
 	sessionRecoveryMessageScanLimit = 25
 	sessionRecoveryThreadLineLimit  = 1000
 	sessionRecoveryMaxTranscriptAge = 2 * time.Minute
+	sessionRecoveryScanTimeout      = 3 * time.Second
 	summaryMessageMaxLen            = 1900
 
 	// Cap on REST calls we make for summary edits. Discord's per-channel
@@ -59,10 +60,9 @@ var (
 //
 // Graceful degradation: if the initial summary post or thread creation
 // fails (permissions, rate limit, network), the sessionOutput is still
-// returned in a usable but reduced-function state — PostLine falls back to
-// the parent transcript channel, NoteSpeaker / Close become no-ops. The
-// operator still gets transcripts; they just see old-style line-per-message
-// output until the next session.
+// returned in a usable but reduced-function state. PostLine first retries
+// creating the summary/thread with its fresh request context, then falls back
+// to the parent transcript channel only if repair fails.
 type sessionOutput struct {
 	session             discordSession
 	transcriptChannelID string
@@ -105,7 +105,9 @@ const transcriptCaptureMax = 3000
 //
 // summarizer is optional; if nil, Close keeps the legacy stats-line summary.
 //
-// Caller's ctx governs the two REST calls; budget ~5s total.
+// Caller's ctx governs setup, but active-session recovery gets a smaller child
+// budget so stale-history scans cannot consume all time needed to create the
+// fresh summary/thread.
 func newSessionOutput(ctx context.Context, session discordSession, transcriptChID, voiceChID, guildID string, log *slog.Logger, summarizer TranscriptSummarizer) *sessionOutput {
 	out := &sessionOutput{
 		session:             session,
@@ -126,7 +128,10 @@ func newSessionOutput(ctx context.Context, session discordSession, transcriptChI
 		log.Debug("voice: channel-name lookup failed; using ID", "err", err, "voice_channel_id", voiceChID)
 	}
 
-	if out.recoverActive(ctx) {
+	recoveryCtx, cancelRecovery := context.WithTimeout(ctx, sessionRecoveryScanTimeout)
+	recovered := out.recoverActive(recoveryCtx)
+	cancelRecovery()
+	if recovered {
 		return out
 	}
 
@@ -167,6 +172,10 @@ func (o *sessionOutput) recoverActive(ctx context.Context) bool {
 		return false
 	}
 	for _, msg := range msgs {
+		if err := ctx.Err(); err != nil {
+			o.log.Debug("voice: active session recovery scan timed out", "err", err, "transcript_channel_id", o.transcriptChannelID)
+			return false
+		}
 		if msg == nil || !o.isRecoverableSummary(msg.Content) {
 			continue
 		}
@@ -290,10 +299,16 @@ func (o *sessionOutput) PostLine(ctx context.Context, displayName, text string) 
 	o.mu.Lock()
 	target := o.threadChannelID
 	hitCap := o.utteranceCount >= threadMessageCap
+	if target == "" && !hitCap {
+		target = o.ensureThreadForPostingLocked(ctx)
+	}
 	if target == "" || hitCap {
 		if hitCap && o.droppedOnCap == 0 {
 			o.log.Warn("voice: thread hit 1000-message cap; spilling to parent transcript channel",
 				"thread_channel_id", o.threadChannelID, "transcript_channel_id", o.transcriptChannelID)
+		} else if target == "" {
+			o.log.Warn("voice: transcript thread unavailable; spilling line to parent transcript channel",
+				"summary_msg_id", o.summaryMsgID, "transcript_channel_id", o.transcriptChannelID)
 		}
 		if hitCap {
 			o.droppedOnCap++
@@ -317,6 +332,51 @@ func (o *sessionOutput) PostLine(ctx context.Context, displayName, text string) 
 			"err", err, "target_channel_id", target)
 		return
 	}
+}
+
+// ensureThreadForPostingLocked repairs degraded setup before PostLine falls
+// back to the parent transcript channel. Caller must hold mu; this method
+// releases it around Discord REST calls and returns with mu held.
+func (o *sessionOutput) ensureThreadForPostingLocked(ctx context.Context) string {
+	summaryMsgID := o.summaryMsgID
+	if summaryMsgID == "" {
+		summaryText := o.initialSummaryText()
+		o.mu.Unlock()
+		msg, err := o.session.ChannelMessageSend(o.transcriptChannelID, summaryText, discordgo.WithContext(ctx))
+		o.mu.Lock()
+		if err != nil || msg == nil {
+			o.log.Warn("voice: lazy initial summary post failed; falling back to parent transcript channel",
+				"err", err, "transcript_channel_id", o.transcriptChannelID)
+			return ""
+		}
+		if o.summaryMsgID == "" {
+			o.summaryMsgID = msg.ID
+			summaryMsgID = msg.ID
+		} else {
+			summaryMsgID = o.summaryMsgID
+		}
+	}
+
+	if o.threadChannelID != "" {
+		return o.threadChannelID
+	}
+	threadName := o.threadName()
+	o.mu.Unlock()
+	thread, err := o.session.MessageThreadStart(o.transcriptChannelID, summaryMsgID, threadName, threadAutoArchiveMinutes, discordgo.WithContext(ctx))
+	o.mu.Lock()
+	if err != nil || thread == nil {
+		o.log.Warn("voice: lazy thread start failed; falling back to parent transcript channel",
+			"err", err, "transcript_channel_id", o.transcriptChannelID, "summary_msg_id", summaryMsgID)
+		return ""
+	}
+	if o.threadChannelID == "" {
+		o.threadChannelID = thread.ID
+	}
+	o.log.Info("voice: transcript thread recovered after degraded setup",
+		"summary_msg_id", o.summaryMsgID,
+		"thread_channel_id", o.threadChannelID,
+	)
+	return o.threadChannelID
 }
 
 // NoteSpeaker records a speaker for the session and refreshes the summary
