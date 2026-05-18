@@ -88,6 +88,38 @@ func Test_newSessionOutput_summary_post_failure_keeps_output_usable(t *testing.T
 	}
 }
 
+func Test_PostLine_recovers_summary_and_thread_after_initial_summary_failure(t *testing.T) {
+	summaryAttempts := 0
+	fs := &fakeSession{
+		channelSendFn: func(ch, content string) (*discordgo.Message, error) {
+			if ch == "transcript-ch" && strings.Contains(content, "Voice session started") {
+				summaryAttempts++
+				if summaryAttempts == 1 {
+					return nil, errors.New("context deadline exceeded")
+				}
+				return &discordgo.Message{ID: "summary-recovered"}, nil
+			}
+			return &discordgo.Message{ID: "line-msg"}, nil
+		},
+	}
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
+	if out.summaryMsgID != "" || out.threadChannelID != "" {
+		t.Fatalf("setup should start degraded; got summary=%q thread=%q", out.summaryMsgID, out.threadChannelID)
+	}
+
+	out.PostLine(context.Background(), "alice", "hi after recovery")
+
+	if out.summaryMsgID != "summary-recovered" {
+		t.Fatalf("expected lazy summary recovery; got %q", out.summaryMsgID)
+	}
+	if out.threadChannelID != "thread-1" {
+		t.Fatalf("expected lazy thread recovery; got %q", out.threadChannelID)
+	}
+	if got := fs.sendsByChannel["thread-1"]; len(got) != 1 || got[0] != "alice: hi after recovery" {
+		t.Fatalf("expected transcript line in recovered thread; got %v", got)
+	}
+}
+
 // Thread-create failure leaves the output in "parent-channel only" mode.
 func Test_newSessionOutput_thread_failure_falls_back_to_parent(t *testing.T) {
 	fs := &fakeSession{
@@ -106,6 +138,40 @@ func Test_newSessionOutput_thread_failure_falls_back_to_parent(t *testing.T) {
 	// Should post in the PARENT transcript channel (fallback), not a thread.
 	if posts := fs.sendsByChannel["transcript-ch"]; len(posts) < 2 {
 		t.Fatalf("expected >=2 parent-channel sends (summary + fallback line); got %d", len(posts))
+	}
+}
+
+func Test_PostLine_recovers_thread_after_initial_thread_failure(t *testing.T) {
+	threadAttempts := 0
+	fs := &fakeSession{
+		messageThreadStart: func(_, _, _ string, _ int) (*discordgo.Channel, error) {
+			threadAttempts++
+			if threadAttempts == 1 {
+				return nil, errors.New("rate limit")
+			}
+			return &discordgo.Channel{ID: "thread-recovered"}, nil
+		},
+	}
+	out := newSessionOutput(context.Background(), fs, "transcript-ch", "voice-ch", "guild-1", discardLogger(), nil)
+	if out.summaryMsgID == "" {
+		t.Fatal("summary should have been posted before thread create failed")
+	}
+	if out.threadChannelID != "" {
+		t.Fatalf("setup should start without a thread; got %q", out.threadChannelID)
+	}
+
+	out.PostLine(context.Background(), "alice", "hi in thread")
+
+	if out.threadChannelID != "thread-recovered" {
+		t.Fatalf("expected lazy thread recovery; got %q", out.threadChannelID)
+	}
+	if got := fs.sendsByChannel["thread-recovered"]; len(got) != 1 || got[0] != "alice: hi in thread" {
+		t.Fatalf("expected transcript line in recovered thread; got %v", got)
+	}
+	for _, post := range fs.sendsByChannel["transcript-ch"] {
+		if post == "alice: hi in thread" {
+			t.Fatalf("transcript line should not spill to parent after lazy thread recovery; parent posts: %v", fs.sendsByChannel["transcript-ch"])
+		}
 	}
 }
 
