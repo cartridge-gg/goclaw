@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -28,8 +29,10 @@ const (
 	readOnlyUniquenessThreshold = 0.6
 
 	// Same-result: same tool returning identical results with different args.
-	sameResultWarning  = 4
-	sameResultCritical = 6
+	sameResultWarning       = 4
+	sameResultCritical      = 6
+	sameResultShellCritical = 10
+	sameResultPreviewLimit  = 240
 )
 
 // mutatingTools are tools that indicate real progress (write/create/action).
@@ -59,24 +62,32 @@ var teamTasksNeutralActions = map[string]bool{
 // toolLoopState tracks recent tool calls within a single agent run
 // to detect infinite loops (same tool + same args + same result).
 type toolLoopState struct {
-	history        []toolCallRecord
-	readOnlyStreak int             // consecutive non-mutating, non-exec tool calls
-	readOnlyUnique int             // unique args hashes in current streak
-	seenReadArgs   map[string]bool // tracks unique read arg hashes for uniqueness ratio
+	history              []toolCallRecord
+	readOnlyStreak       int             // consecutive non-mutating, non-exec tool calls
+	readOnlyUnique       int             // unique args hashes in current streak
+	seenReadArgs         map[string]bool // tracks unique read arg hashes for uniqueness ratio
+	sameResultGeneration int             // incremented when a mutating tool makes progress
 }
 
 type toolCallRecord struct {
-	toolName   string
-	argsHash   string
-	resultHash string // empty until result is recorded
+	toolName      string
+	argsHash      string
+	argsLen       int
+	resultHash    string // empty until result is recorded
+	resultLen     int
+	resultPreview string
+	isError       bool
+	generation    int
 }
 
 // record adds a tool call to history and returns its argsHash.
 func (s *toolLoopState) record(toolName string, args map[string]any) string {
 	h := hashToolCall(toolName, args)
 	s.history = append(s.history, toolCallRecord{
-		toolName: toolName,
-		argsHash: h,
+		toolName:   toolName,
+		argsHash:   h,
+		argsLen:    len(stableJSON(args)),
+		generation: s.sameResultGeneration,
 	})
 	if len(s.history) > toolLoopHistorySize {
 		s.history = s.history[len(s.history)-toolLoopHistorySize:]
@@ -86,12 +97,22 @@ func (s *toolLoopState) record(toolName string, args map[string]any) string {
 
 // recordResult updates the most recent matching record with the result hash.
 func (s *toolLoopState) recordResult(argsHash, resultContent string) {
+	s.recordResultStatus(argsHash, resultContent, false)
+}
+
+// recordResultStatus updates the most recent matching record with the result
+// hash and safe diagnostics. resultPreview is redacted before storing so loop
+// detector logs can include enough context without leaking common credentials.
+func (s *toolLoopState) recordResultStatus(argsHash, resultContent string, isError bool) {
 	rh := hashResult(resultContent)
 	// Walk backward to find the latest record with matching argsHash and no result yet.
 	for i := len(s.history) - 1; i >= 0; i-- {
 		rec := &s.history[i]
 		if rec.argsHash == argsHash && rec.resultHash == "" {
 			rec.resultHash = rh
+			rec.resultLen = len(resultContent)
+			rec.resultPreview = safeResultPreview(resultContent)
+			rec.isError = isError
 			return
 		}
 	}
@@ -158,12 +179,14 @@ func (s *toolLoopState) recordMutation(toolName string, args map[string]any) {
 			// Missing action arg — treat as neutral to avoid crash.
 		default:
 			// All other actions (create, complete, cancel, comment, etc.) = mutating.
+			s.markProgress()
 			s.resetStreak()
 		}
 		return
 	}
 
 	if mutatingTools[toolName] {
+		s.markProgress()
 		s.resetStreak()
 		return
 	}
@@ -174,6 +197,10 @@ func (s *toolLoopState) recordMutation(toolName string, args map[string]any) {
 		return
 	}
 	s.incrementReadOnly(toolName, args)
+}
+
+func (s *toolLoopState) markProgress() {
+	s.sameResultGeneration++
 }
 
 // resetStreak clears the read-only streak and uniqueness tracking.
@@ -240,32 +267,139 @@ func (s *toolLoopState) detectReadOnlyStreak() (level, message string) {
 	return "", ""
 }
 
-// detectSameResult checks if the same tool returned identical results multiple
-// times with different arguments. This catches loops where the agent varies
-// args slightly but gets no new information.
+// detectSameResult checks if the same tool returned identical results for many
+// distinct argument sets in the current no-progress window. Repeating the exact
+// same args is handled by detect(); this detector exists for "try variants of
+// the same command/path and get the same answer" loops.
 func (s *toolLoopState) detectSameResult(toolName, resultHash string) (level, message string) {
 	if resultHash == "" {
 		return "", ""
 	}
-	var count int
-	for _, rec := range s.history {
-		if rec.toolName == toolName && rec.resultHash == resultHash {
-			count++
-		}
+	count, distinctArgs := s.sameResultCounts(toolName, resultHash)
+	critical := sameResultCritical
+	if isShellTool(toolName) {
+		critical = sameResultShellCritical
 	}
-	if count >= sameResultCritical {
+	if distinctArgs >= critical {
 		return "critical", fmt.Sprintf(
-			"CRITICAL: %s returned identical results %d times (with different arguments). "+
-				"Stopping to prevent runaway loop.", toolName, count)
+			"CRITICAL: %s returned identical results for %d distinct argument sets (%d total results). "+
+				"Stopping to prevent runaway loop.", toolName, distinctArgs, count)
 	}
-	if count >= sameResultWarning {
+	if distinctArgs >= sameResultWarning {
+		if isShellTool(toolName) {
+			return "warning", fmt.Sprintf(
+				"[System: WARNING — %s has returned the same result for %d distinct argument sets. "+
+					"Stop trying shell variants of the same approach. Use a different tool, change strategy, "+
+					"or report the concrete blocker to the user.]",
+				toolName, distinctArgs)
+		}
 		return "warning", fmt.Sprintf(
-			"[System: WARNING — %s has returned the same result %d times with different arguments. "+
+			"[System: WARNING — %s has returned the same result for %d distinct argument sets. "+
 				"The information is already in your context. Stop re-reading and take action — "+
 				"use edit/write_file to modify files, or respond to the user if you are stuck.]",
-			toolName, count)
+			toolName, distinctArgs)
 	}
 	return "", ""
+}
+
+func (s *toolLoopState) sameResultCounts(toolName, resultHash string) (count, distinctArgs int) {
+	seenArgs := make(map[string]bool)
+	for _, rec := range s.history {
+		if rec.toolName != toolName || rec.resultHash != resultHash || rec.generation != s.sameResultGeneration {
+			continue
+		}
+		count++
+		if !seenArgs[rec.argsHash] {
+			seenArgs[rec.argsHash] = true
+			distinctArgs++
+		}
+	}
+	return count, distinctArgs
+}
+
+func (s *toolLoopState) sameResultLogAttrs(toolName, resultHash string) []any {
+	count, distinctArgs := s.sameResultCounts(toolName, resultHash)
+	attrs := []any{
+		"result_hash", resultHash,
+		"same_result_count", count,
+		"same_result_distinct_args", distinctArgs,
+		"same_result_generation", s.sameResultGeneration,
+	}
+
+	recent := make([]string, 0, 6)
+	var resultLen, errorCount int
+	var preview string
+	for i := len(s.history) - 1; i >= 0 && len(recent) < 6; i-- {
+		rec := s.history[i]
+		if rec.toolName != toolName || rec.resultHash != resultHash || rec.generation != s.sameResultGeneration {
+			continue
+		}
+		if rec.isError {
+			errorCount++
+		}
+		if resultLen == 0 {
+			resultLen = rec.resultLen
+		}
+		if preview == "" {
+			preview = rec.resultPreview
+		}
+		recent = append(recent, fmt.Sprintf("%s/%d/error=%t", shortHash(rec.argsHash), rec.argsLen, rec.isError))
+	}
+	if resultLen != 0 {
+		attrs = append(attrs, "result_len", resultLen)
+	}
+	if errorCount != 0 {
+		attrs = append(attrs, "same_result_recent_errors", errorCount)
+	}
+	if preview != "" {
+		attrs = append(attrs, "result_preview", preview)
+	}
+	if len(recent) > 0 {
+		attrs = append(attrs, "recent_arg_hashes", strings.Join(recent, ","))
+	}
+	return attrs
+}
+
+func isShellTool(toolName string) bool {
+	return toolName == "exec" || toolName == "bash"
+}
+
+func shortHash(h string) string {
+	if len(h) <= 12 {
+		return h
+	}
+	return h[:12]
+}
+
+var resultSecretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*`),
+	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{8,}`),
+	regexp.MustCompile(`\bgh[opsru]_[A-Za-z0-9_]{10,}`),
+	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{10,}`),
+	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
+	regexp.MustCompile(`(?i)\b(token|api[_-]?key|secret|password)\s*[:=]\s*[^[:space:]]+`),
+}
+
+func safeResultPreview(s string) string {
+	s = strings.TrimSpace(s)
+	for _, re := range resultSecretPatterns {
+		s = re.ReplaceAllStringFunc(s, redactSecretMatch)
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > sameResultPreviewLimit {
+		s = s[:sameResultPreviewLimit] + "..."
+	}
+	return s
+}
+
+func redactSecretMatch(match string) string {
+	if i := strings.IndexAny(match, ":="); i >= 0 {
+		return match[:i+1] + "[REDACTED]"
+	}
+	if strings.HasPrefix(strings.ToLower(match), "bearer ") {
+		return "Bearer [REDACTED]"
+	}
+	return "[REDACTED]"
 }
 
 // hashToolCall produces a deterministic hash of tool name + arguments.

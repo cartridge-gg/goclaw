@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -638,6 +639,90 @@ func TestSameResult_Critical(t *testing.T) {
 	level, _ := s.detectSameResult("list_files", rh)
 	if level != "critical" {
 		t.Fatalf("expected critical after %d same-result calls, got %q", sameResultCritical, level)
+	}
+}
+
+func TestSameResult_IgnoresRepeatedSameArgs(t *testing.T) {
+	var s toolLoopState
+	sameResult := "same empty output"
+	args := map[string]any{"cmd": "git status --short"}
+	for range sameResultShellCritical + 2 {
+		h := s.record("exec", args)
+		s.recordResult(h, sameResult)
+	}
+	rh := hashResult(sameResult)
+	level, _ := s.detectSameResult("exec", rh)
+	if level != "" {
+		t.Fatalf("expected repeated same args to be handled only by same-args detector, got %q", level)
+	}
+}
+
+func TestSameResult_ResetsAfterMutation(t *testing.T) {
+	var s toolLoopState
+	sameResult := "same empty output"
+	for i := range sameResultWarning - 1 {
+		h := s.record("list_files", map[string]any{"path": fmt.Sprintf("before-%d", i)})
+		s.recordResult(h, sameResult)
+	}
+	s.recordMutation("edit", map[string]any{"path": "file.go"})
+	for i := range sameResultWarning - 1 {
+		h := s.record("list_files", map[string]any{"path": fmt.Sprintf("after-%d", i)})
+		s.recordResult(h, sameResult)
+	}
+
+	rh := hashResult(sameResult)
+	level, _ := s.detectSameResult("list_files", rh)
+	if level != "" {
+		t.Fatalf("expected mutation to start a fresh same-result window, got %q", level)
+	}
+}
+
+func TestSameResult_ShellUsesHigherCriticalThreshold(t *testing.T) {
+	var s toolLoopState
+	sameResult := "STDERR:\npermission denied\n"
+	for i := range sameResultCritical {
+		h := s.record("exec", map[string]any{"cmd": fmt.Sprintf("try variant %d", i)})
+		s.recordResult(h, sameResult)
+	}
+	rh := hashResult(sameResult)
+	level, _ := s.detectSameResult("exec", rh)
+	if level != "warning" {
+		t.Fatalf("expected shell same-result at default critical count to warn, got %q", level)
+	}
+
+	for i := sameResultCritical; i < sameResultShellCritical; i++ {
+		h := s.record("exec", map[string]any{"cmd": fmt.Sprintf("try variant %d", i)})
+		s.recordResult(h, sameResult)
+	}
+	level, _ = s.detectSameResult("exec", rh)
+	if level != "critical" {
+		t.Fatalf("expected shell same-result critical after %d distinct args, got %q", sameResultShellCritical, level)
+	}
+}
+
+func TestSameResultLogAttrsRedactsPreview(t *testing.T) {
+	var s toolLoopState
+	result := "STDERR: failed with token=secret123 and Bearer abc.def.ghi"
+	for i := range sameResultWarning {
+		h := s.record("exec", map[string]any{"cmd": fmt.Sprintf("cmd-%d", i)})
+		s.recordResultStatus(h, result, true)
+	}
+
+	attrs := s.sameResultLogAttrs("exec", hashResult(result))
+	var preview string
+	for i := 0; i < len(attrs)-1; i += 2 {
+		if attrs[i] == "result_preview" {
+			preview, _ = attrs[i+1].(string)
+		}
+	}
+	if preview == "" {
+		t.Fatal("expected result_preview attr")
+	}
+	if strings.Contains(preview, "secret123") || strings.Contains(preview, "abc.def.ghi") {
+		t.Fatalf("preview leaked secret material: %q", preview)
+	}
+	if !strings.Contains(preview, "[REDACTED]") {
+		t.Fatalf("preview missing redaction marker: %q", preview)
 	}
 }
 
