@@ -38,7 +38,7 @@ func (l *Loop) processToolResult(
 
 	// Record for loop detection.
 	argsHash := rs.loopDetector.record(registryName, tc.Arguments)
-	rs.loopDetector.recordResult(argsHash, result.ForLLM)
+	rs.loopDetector.recordResultStatus(argsHash, result.ForLLM, result.IsError)
 	rs.loopDetector.recordMutation(registryName, tc.Arguments)
 
 	if result.Async {
@@ -136,12 +136,15 @@ func (l *Loop) processToolResult(
 	if rh := hashResult(result.ForLLM); rh != "" {
 		if level, msg := rs.loopDetector.detectSameResult(registryName, rh); level != "" {
 			if level == "critical" {
-				slog.Warn("tool loop critical: same result",
-					"tool", registryName, "agent", l.id, "run", req.RunID)
+				attrs := []any{"tool", registryName, "agent", l.id, "run", req.RunID}
+				attrs = append(attrs, rs.loopDetector.sameResultLogAttrs(registryName, rh)...)
+				slog.Warn("tool loop critical: same result", attrs...)
 				rs.finalContent = msg
 				rs.loopKilled = true
 				return toolMsg, nil, toolResultBreak
 			}
+			slog.Warn("tool loop warning: same result",
+				append([]any{"tool", registryName, "agent", l.id, "run", req.RunID}, rs.loopDetector.sameResultLogAttrs(registryName, rh)...)...)
 			warningMsgs = append(warningMsgs, providers.Message{Role: "user", Content: msg})
 			action = toolResultWarning
 		}
